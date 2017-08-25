@@ -98,7 +98,7 @@
         <scalatest.version>3.0.5</scalatest.version>
         <spark1.version>${cdh.spark.version}</spark1.version>
         <!-- Maintain Java 7 compatibility -->
-        <spark2.version>2.1.2</spark2.version>
+        <spark2.version>2.1.0.cloudera1</spark2.version>
 
         <!-- Misc variables -->
         <testdata.dir>${project.build.directory}/testdata</testdata.dir>
