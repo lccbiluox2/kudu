@@ -27,11 +27,10 @@ import scala.collection.mutable
 
 import org.apache.hadoop.util.ShutdownHookManager
 import org.apache.kudu.ColumnTypeAttributes.ColumnTypeAttributesBuilder
-import org.apache.spark.SparkContext
+import org.apache.spark.{AccumulatorParam, SparkContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types.{DataType, DataTypes, DecimalType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.spark.util.AccumulatorV2
 import org.apache.yetus.audience.InterfaceStability
 import org.slf4j.{Logger, LoggerFactory}
 
@@ -56,38 +55,25 @@ class KuduContext(val kuduMaster: String,
     * propagated timestamp of all executors and can only read by the
     * driver.
     */
-  private[kudu] class TimestampAccumulator(var timestamp: Long = 0L)
-      extends AccumulatorV2[Long, Long] {
-    override def isZero: Boolean = {
-      timestamp == 0
+  private object TimestampAccumulator extends AccumulatorParam[Long] {
+    override def zero(initialValue: Long): Long = 0L
+
+    override def addAccumulator(v1: Long, v2: Long): Long = {
+      v1.max(v2)
     }
 
-    override def copy(): AccumulatorV2[Long, Long] = {
-      new TimestampAccumulator(timestamp)
-    }
-
-    override def reset(): Unit = {
-      timestamp = 0L
-    }
-
-    override def add(v: Long): Unit = {
-      timestamp = timestamp.max(v)
-    }
-
-    override def merge(other: AccumulatorV2[Long, Long]): Unit = {
-      timestamp = timestamp.max(other.value)
+    override def addInPlace(v1: Long, v2: Long): Long = {
+      val timestamp = v1.max(v2)
 
       // Since for every write/scan operation, each executor holds its own copy of
       // client. We need to update the propagated timestamp on the driver based on
       // the latest propagated timestamp from all executors through TimestampAccumulator.
-      syncClient.updateLastPropagatedTimestamp(timestampAccumulator.value)
+      syncClient.updateLastPropagatedTimestamp(timestamp)
+      timestamp
     }
-
-    override def value: Long = timestamp
   }
 
-  val timestampAccumulator = new TimestampAccumulator()
-  sc.register(timestampAccumulator)
+  val timestampAccumulator = sc.accumulator(0L)(TimestampAccumulator)
 
   import kudu.KuduContext._
 
