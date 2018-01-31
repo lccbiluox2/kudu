@@ -2685,21 +2685,14 @@ TEST_F(RaftConsensusITest, TestLogIOErrorIsFatal) {
 // uuid but with the same host and port, replicas that were hosted by the
 // previous incarnation are correctly detected as failed and eventually
 // re-replicated.
-TEST_P(RaftConsensusParamReplicationModesITest, TestRestartWithDifferentUUID) {
+TEST_F(RaftConsensusITest, TestRestartWithDifferentUUID) {
   // Start a cluster and insert data.
-  const bool prepare_replacement_before_eviction = GetParam();
   ExternalMiniClusterOptions opts;
   opts.num_tablet_servers = 5;
   opts.extra_tserver_flags = {
     // Set a low timeout. If we can't re-replicate in a reasonable amount of
     // time, it means we're not evicting at all.
     "--follower_unavailable_considered_failed_sec=10",
-    Substitute("--raft_prepare_replacement_before_eviction=$0",
-               prepare_replacement_before_eviction),
-  };
-  opts.extra_master_flags = {
-    Substitute("--raft_prepare_replacement_before_eviction=$0",
-               prepare_replacement_before_eviction),
   };
   cluster_.reset(new ExternalMiniCluster(std::move(opts)));
   ASSERT_OK(cluster_->Start());
