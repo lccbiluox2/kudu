@@ -23,46 +23,55 @@ import time
 from cm_api.api_client import ApiResource
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Uses Cloudera Manager to upgrade the KUDU "
-                                                 "parcel to the newest compatible version. Will "
-                                                 "not upgrade to a new version of Kudu, i.e. the "
-                                                 "release version will be the same on the new "
-                                                 "parcel. After a new parcel is successfully "
-                                                 "activated, the existing KUDU service is "
+    parser = argparse.ArgumentParser(description="Uses Cloudera Manager to upgrade the specified "
+                                                 "parcel to the newest compatible revision. "
+                                                 "Will not upgrade to a new version of the "
+                                                 "service, i.e. the release version will be the "
+                                                 "same on the new parcel. After a new parcel is "
+                                                 "successfully activated, the affected service is "
                                                  "restarted.")
     parser.add_argument("--host", type=str, default="localhost",
                         help="Hostname of the Cloudera Manager server. Default is localhost.")
+    parser.add_argument("--port", type=int, default=7180,
+                        help="Port of the Cloudera Manager server. Default is 7180, the default "
+                        "Cloudera Manager port.")
     parser.add_argument("--user", type=str, default="admin",
-                        help="Username with which to log into Cloudera Manager. Default is 'admin'.")
+                        help="Username with which to log into Cloudera Manager. Default is "
+                        "'admin'.")
     parser.add_argument("--password", type=str, default="admin",
-                        help="Password with which to log into Cloudera Manager. Default is 'admin'.")
+                        help="Password with which to log into Cloudera Manager. Default is "
+                        "'admin'.")
+    parser.add_argument("--parcel-name", type=str, default="CDH",
+                       help="Parcel Name to upgrade.")
     parser.add_argument("--cluster", type=str,
-                        help="Name of an existing cluster on which the Kudu service should be "
-                        "upgraded. If not specified, uses the only cluster available or raises an "
-                        "exception if multiple or no clusters are found.")
-    parser.add_argument("--kudu-service", type=str,
-                        help="Name of an existing Kudu service to be restarted after the parcel is "
-                        "upgraded. If none specified, uses the only one available or raises an "
-                        "exception if multiple or no Kudu services are found.")
+                        help="Name of an existing cluster on which the service should be upgraded. "
+                        "If not specified, uses the only cluster available or raises an exception "
+                        "if multiple or no clusters are found.")
+    parser.add_argument("--service-name", type=str,
+                        help="Name of the service to be restarted after the parcel is upgraded. If "
+                        "none specified, restarts all stale services on the cluster.")
     parser.add_argument("--max-time-per-stage", type=int, default=120,
                         help="Maximum amount of time in seconds allotted to waiting for any single "
                         "stage of parcel distribution (i.e. downloading, distributing, "
                         "activating) or removal. Default is two minutes.")
-    parser.add_argument("--clear-after-success", type=bool, default=False,
-                        help="Flag indicating whether CM should remove unused Kudu parcels after a "
-                        "successful upgrade. A parcel is deemed unused if its status is not "
-                        "ACTIVATED (i.e. DISTRIBUTED or DOWNLOADED) after the upgrade process is "
-                        "completed.")
+    parser.add_argument("--clear-after-success", action="store_true", default=False,
+                        help="Flag indicating whether Cloudera Manager should remove unused Kudu "
+                        "parcels after a successful upgrade. A parcel is deemed unused if its "
+                        "status is not ACTIVATED (i.e. DISTRIBUTED or DOWNLOADED) after the "
+                        "upgrade process is completed.")
+    parser.add_argument("--dry-run", action="store_true", default=False,
+                        help="Flag indicating that the script won't actually upgrade the cluster. "
+                        "Useful to see what changes would be made.")
     return parser.parse_args()
 
-def get_best_upgrade_candidate_parcel(cluster):
+def get_best_upgrade_candidate_parcel(cluster, parcel_name):
     # A parcel is an upgrade candidate if 1) it has the same release version as the currently active
     # parcel, and 2) it has a greater build number than the currently active parcel. The best
     # candidate will be the one with the greatest build number.
     activated_parcels = []
     candidate_parcels = []
     for parcel in cluster.get_all_parcels():
-        if parcel.product == "KUDU":
+        if parcel.product == parcel_name:
             if parcel.stage == "ACTIVATED":
                 activated_parcels.append(parcel)
             else:
@@ -106,7 +115,8 @@ def get_best_upgrade_candidate_parcel(cluster):
             print("No upgrade candidates available for parcel version %s-%s." %
                   (greatest_activated.product, greatest_activated.version))
             return None
-    raise Exception("No activated KUDU parcels found. Activate one first and then upgrade.")
+    raise Exception("No activated %s parcels found. Activate one first and then upgrade."
+                    % parcel_name)
 
 def wait_for_parcel_stage(cluster, parcel, stage, max_time):
     for attempt in xrange(1, max_time + 1):
@@ -124,6 +134,9 @@ def wait_for_parcel_stage(cluster, parcel, stage, max_time):
                         (parcel.product, parcel.version, stage, max_time))
 
 def ensure_parcel_activated(cluster, parcel, max_time_per_stage):
+    if dry_run:
+        print("Running a dry-run. Not activating parcel %s-%s" % (parcel.product, parcel.version))
+        return
     parcel_stage = parcel.stage
     if parcel_stage == "AVAILABLE_REMOTELY":
         print("Downloading parcel: %s-%s" % (parcel.product, parcel.version))
@@ -150,73 +163,86 @@ def find_cluster(api, cluster_name):
     if len(all_clusters) == 0:
         raise Exception("No clusters found; create one before calling this script.")
     if len(all_clusters) > 1:
-        raise Exception("More than one cluster found; specify which cluster to use using --cluster.")
+        raise Exception("More than one cluster found; specify which cluster to use with --cluster.")
     cluster = all_clusters[0]
     print("Found cluster: %s" % cluster.displayName)
     return cluster
 
-def find_kudu_service(cluster, kudu_service_name):
-    all_kudu_services = [s for s in cluster.get_all_services() if s.type == "KUDU"]
-    if len(all_kudu_services) == 0:
-        raise Exception("No Kudu services found on %s." % cluster.displayName)
-    if kudu_service_name:
-        services_with_name = [s for s in all_kudu_services if s.displayName == kudu_service_name]
-        if not len(services_with_name) == 1:
-            raise Exception("Input service name does not uniquely identify a Kudu service.")
-        return services_with_name[0]
-    if len(all_kudu_services) > 1:
-        raise Exception("More than one Kudu service found; specify which service to use with "
-                        "--kudu_service.")
-    kudu_service = all_kudu_services[0]
-    print("Found Kudu service: %s" % kudu_service.displayName)
-    return kudu_service
+def find_service(cluster, service_name):
+    all_services = [s for s in cluster.get_all_services() if s.displayName == service_name]
+    if len(all_services) == 0:
+        raise Exception("No services named %s found on %s." % (service_name, cluster.displayName))
+    if not len(all_services) == 1:
+        raise Exception("Input service name does not uniquely identify a service.")
+    service = all_services[0]
+    print("Found service: %s" % service.displayName)
+    return service
 
-def clear_unused_parcels(cluster, max_time_per_stage):
-    def ensure_parcel_removed(cluster, parcel, max_time_per_stage):
-        parcel_stage = parcel.stage
-        if parcel_stage == "DISTRIBUTED":
-            print("Removing parcel distribution: %s-%s" % (parcel.product, parcel.version))
-            parcel.start_removal_of_distribution()
-            wait_for_parcel_stage(cluster, parcel, "DOWNLOADED", max_time_per_stage)
-            parcel_stage = "DOWNLOADED"
-            print("Removed parcel distribution: %s-%s" % (parcel.product, parcel.version))
-        if parcel_stage == "DOWNLOADED":
-            # Don't wait for AVAILABLE_REMOTELY, as the parcel may no longer exist in the repo.
-            # If this is the case, CM will not be able to find the parcel to verify its stage.
-            print("Removing parcel download: %s-%s" % (parcel.product, parcel.version))
-            parcel.remove_download()
-    for parcel in cluster.get_all_parcels():
-        if parcel.product == "KUDU" and not parcel.stage == "ACTIVATED":
-            ensure_parcel_removed(cluster, parcel, max_time_per_stage)
+def ensure_parcel_removed(cluster, parcel, max_time_per_stage):
+    parcel_stage = parcel.stage
+    if parcel_stage == "DISTRIBUTED":
+        print("Removing parcel distribution: %s-%s" % (parcel.product, parcel.version))
+        parcel.start_removal_of_distribution()
+        wait_for_parcel_stage(cluster, parcel, "DOWNLOADED", max_time_per_stage)
+        parcel_stage = "DOWNLOADED"
+        print("Removed parcel distribution: %s-%s" % (parcel.product, parcel.version))
+    if parcel_stage == "DOWNLOADED":
+        # Don't wait for AVAILABLE_REMOTELY, as the parcel may no longer exist in the repo.
+        # If this is the case, CM will not be able to find the parcel to verify its stage.
+        print("Removing parcel download: %s-%s" % (parcel.product, parcel.version))
+        parcel.remove_download()
 
 def main():
     args = parse_args()
+    print("Connecting to %s:%d..." % (args.host, args.port))
     api = ApiResource(args.host,
+                      args.port,
                       username=args.user,
                       password=args.password,
                       version=10)
     cluster = find_cluster(api, args.cluster)
 
+    global dry_run
+    dry_run = args.dry_run
+
     # Get the parcels available to this cluster. Get the newest one that is not activated, ensuring
     # that it has a greater build number than that ACTIVATED and that it distributes the same
     # release version of Kudu.
-    parcel = get_best_upgrade_candidate_parcel(cluster)
+    parcel = get_best_upgrade_candidate_parcel(cluster, args.parcel_name)
     if parcel is None:
-        print("Cannot upgrade parcel. Exiting early.")
+        print("Cannot upgrade %s parcel. Exiting early." % args.parcel_name)
         return
 
     # Start up the upgrade process and activate the new parcel.
     ensure_parcel_activated(cluster, parcel, args.max_time_per_stage)
 
-    # Restart the Kudu service synchronously, ensuring that the service comes to a stop before
-    # continuing. This ensures that the parcels will not be in-use when they're removed.
-    kudu_service = find_kudu_service(cluster, args.kudu_service)
-    kudu_service.restart().wait()
+    # Restart the services synchronously, ensuring they come to a stop before continuing. This
+    # ensures that the parcels will not be in-use when they're removed.
+    if args.service_name:
+        service = find_service(cluster, args.service_name)
+        to_restart = "service %s" % args.service_name
+        run_restart = lambda: service.restart().wait()
+    else:
+        to_restart = "stale services"
+        run_restart = lambda: cluster.restart(restart_only_stale_services=True).wait()
+    if dry_run:
+        print("Running a dry-run. Not restarting %s..." % to_restart)
+    else:
+        print("Restarting %s..." % to_restart)
+        run_restart()
 
-    # Now that the Kudu service has been restarted, and older, existing parcels are not being used,
+    # Now that the services have been restarted, and older, existing parcels are not being used,
     # clear the unused parcels if needed.
     if args.clear_after_success:
-        clear_unused_parcels(cluster, args.max_time_per_stage)
+        inactive_parcels = [parcel for parcel in cluster.get_all_parcels()
+            if parcel.product == args.parcel_name and not parcel.stage == "ACTIVATED"]
+        if dry_run:
+            for parcel in inactive_parcels:
+                print("Runnning a dry-run. Parcel %s-%s is not activated..."
+                    % (parcel.product, parcel.version))
+        else:
+            for parcel in inactive_parcels:
+                ensure_parcel_removed(cluster, parcel, args.max_time_per_stage)
 
 if __name__ == "__main__":
     main()
