@@ -104,9 +104,6 @@
               <goals>
                 <goal>schema</goal>
               </goals>
-              <configuration>
-                <enableDecimalLogicalType>true</enableDecimalLogicalType>
-              </configuration>
           </execution>
         </executions>
       </plugin>

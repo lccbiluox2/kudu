@@ -19,7 +19,6 @@
 
 package org.apache.kudu.flume.sink;
 
-import java.math.BigDecimal;
 import java.nio.charset.Charset;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -254,9 +253,6 @@ public class RegexpKuduOperationsProducer implements KuduOperationsProducer {
   private void coerceAndSet(String rawVal, String colName, Type type, PartialRow row)
       throws NumberFormatException {
     switch (type) {
-      case BOOL:
-        row.addBoolean(colName, Boolean.parseBoolean(rawVal));
-        break;
       case INT8:
         row.addByte(colName, Byte.parseByte(rawVal));
         break;
@@ -266,9 +262,17 @@ public class RegexpKuduOperationsProducer implements KuduOperationsProducer {
       case INT32:
         row.addInt(colName, Integer.parseInt(rawVal));
         break;
-      case INT64: // Fall through
-      case UNIXTIME_MICROS:
+      case INT64:
         row.addLong(colName, Long.parseLong(rawVal));
+        break;
+      case BINARY:
+        row.addBinary(colName, rawVal.getBytes(charset));
+        break;
+      case STRING:
+        row.addString(colName, rawVal);
+        break;
+      case BOOL:
+        row.addBoolean(colName, Boolean.parseBoolean(rawVal));
         break;
       case FLOAT:
         row.addFloat(colName, Float.parseFloat(rawVal));
@@ -276,14 +280,8 @@ public class RegexpKuduOperationsProducer implements KuduOperationsProducer {
       case DOUBLE:
         row.addDouble(colName, Double.parseDouble(rawVal));
         break;
-      case DECIMAL:
-        row.addDecimal(colName, new BigDecimal(rawVal));
-        break;
-      case BINARY:
-        row.addBinary(colName, rawVal.getBytes(charset));
-        break;
-      case STRING:
-        row.addString(colName, rawVal);
+      case UNIXTIME_MICROS:
+        row.addLong(colName, Long.parseLong(rawVal));
         break;
       default:
         logger.warn("got unknown type {} for column '{}'-- ignoring this column",
