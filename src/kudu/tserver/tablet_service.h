@@ -44,6 +44,10 @@ namespace server {
 class ServerBase;
 } // namespace server
 
+namespace tablet {
+class Tablet;
+}
+
 namespace consensus {
 class BulkChangeConfigRequestPB;
 class ChangeConfigRequestPB;
@@ -62,6 +66,7 @@ class RunLeaderElectionRequestPB;
 class RunLeaderElectionResponsePB;
 class StartTabletCopyRequestPB;
 class StartTabletCopyResponsePB;
+class TimeManager;
 class UnsafeChangeConfigRequestPB;
 class UnsafeChangeConfigResponsePB;
 class VoteRequestPB;
@@ -147,7 +152,8 @@ class TabletServiceImpl : public TabletServerServiceIf {
   Status HandleScanAtSnapshot(const NewScanRequestPB& scan_pb,
                               const rpc::RpcContext* rpc_context,
                               const Schema& projection,
-                              tablet::TabletReplica* tablet_replica,
+                              tablet::Tablet* tablet,
+                              consensus::TimeManager* time_manager,
                               gscoped_ptr<RowwiseIterator>* iter,
                               Timestamp* snap_timestamp);
 
