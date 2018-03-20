@@ -46,6 +46,7 @@ import javax.security.auth.callback.CallbackHandler;
 import javax.security.auth.callback.NameCallback;
 import javax.security.auth.callback.PasswordCallback;
 import javax.security.auth.callback.UnsupportedCallbackException;
+import javax.security.auth.kerberos.KerberosTicket;
 import javax.security.sasl.Sasl;
 import javax.security.sasl.SaslClient;
 import javax.security.sasl.SaslException;
@@ -127,6 +128,19 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
    */
   private final SignedTokenPB authnToken;
 
+  private static enum AuthnTokenNotUsedReason {
+    NONE_AVAILABLE("no token is available"),
+    NO_TRUSTED_CERTS("no TLS certificates are trusted by the client"),
+    FORBIDDEN_BY_POLICY("this connection does not allow authentication by tokens"),
+    NOT_CHOSEN_BY_SERVER("the server chose not to accept token authentication");
+
+    AuthnTokenNotUsedReason(String msg) {
+      this.msg = msg;
+    }
+    final String msg;
+  };
+  private AuthnTokenNotUsedReason authnTokenNotUsedReason = null;
+
   private State state = State.INITIAL;
   private SaslClient saslClient;
 
@@ -170,10 +184,20 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
                     boolean ignoreAuthnToken) {
     this.remoteHostname = remoteHostname;
     this.securityContext = securityContext;
-    if (ignoreAuthnToken) {
-      this.authnToken = null;
+    SignedTokenPB token = securityContext.getAuthenticationToken();
+    if (token != null) {
+      if (ignoreAuthnToken) {
+        this.authnToken = null;
+        this.authnTokenNotUsedReason = AuthnTokenNotUsedReason.FORBIDDEN_BY_POLICY;
+      } else if (!securityContext.hasTrustedCerts()) {
+        this.authnToken = null;
+        this.authnTokenNotUsedReason = AuthnTokenNotUsedReason.NO_TRUSTED_CERTS;
+      } else {
+        this.authnToken = token;
+      }
     } else {
-      this.authnToken = securityContext.getAuthenticationToken();
+      this.authnToken = null;
+      this.authnTokenNotUsedReason = AuthnTokenNotUsedReason.NONE_AVAILABLE;
     }
   }
 
@@ -202,7 +226,7 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
 
     // We may also have a token. But, we can only use the token
     // if we are able to use authenticated TLS to authenticate the server.
-    if (authnToken != null && securityContext.hasTrustedCerts()) {
+    if (authnToken != null) {
       builder.addAuthnTypesBuilder().setToken(
           AuthenticationTypePB.Token.getDefaultInstance());
     }
@@ -354,6 +378,14 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
     // choose that mech.
     Map<String, String> errorsByMech = Maps.newHashMap();
     for (String clientMech : PRIORITIZED_MECHS) {
+
+      if ("GSSAPI".equals(clientMech) &&
+          (securityContext.getSubject() == null ||
+           securityContext.getSubject().getPrivateCredentials(KerberosTicket.class).isEmpty())) {
+        errorsByMech.put(clientMech, "client does not have Kerberos credentials (tgt)");
+        continue;
+      }
+
       if (!serverMechs.contains(clientMech)) {
         errorsByMech.put(clientMech, "not advertised by server");
         continue;
@@ -391,11 +423,17 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
     if (serverMechs.size() == 1 && serverMechs.contains("GSSAPI")) {
       // Give a better error diagnostic for common case of an unauthenticated client connecting
       // to a secure server.
-      message = "Server requires Kerberos, but this client is not authenticated (kinit)";
+      message = "server requires authentication, but " +
+          errorsByMech.get("GSSAPI");
     } else {
       message = "Unable to negotiate a matching mechanism. Errors: [" +
                 Joiner.on(", ").withKeyValueSeparator(": ").join(errorsByMech) + "]";
     }
+    if (authnTokenNotUsedReason != null) {
+      message += ". Authentication tokens were not used because " +
+              authnTokenNotUsedReason.msg;
+    }
+
     throw new NonRecoverableException(Status.ConfigurationError(message));
   }
 
@@ -411,6 +449,9 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
     AuthenticationTypePB.TypeCase type = response.getAuthnTypes(0).getTypeCase();
     switch (type) {
       case SASL:
+        if (authnToken != null) {
+          authnTokenNotUsedReason = AuthnTokenNotUsedReason.NOT_CHOSEN_BY_SERVER;
+        }
         break;
       case TOKEN:
         if (authnToken == null) {
