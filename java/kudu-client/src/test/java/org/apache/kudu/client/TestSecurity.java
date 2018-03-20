@@ -15,11 +15,14 @@ package org.apache.kudu.client;
 
 import static org.junit.Assert.assertNotNull;
 
+import org.apache.kudu.client.Client.AuthenticationCredentialsPB;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.kudu.util.SecurityUtil;
+
+import org.hamcrest.CoreMatchers;
 
 public class TestSecurity extends BaseKuduTest {
 
@@ -53,8 +56,10 @@ public class TestSecurity extends BaseKuduTest {
         Assert.fail("should not have been able to connect to a secure cluster " +
             "with no credentials");
       } catch (NonRecoverableException e) {
-        Assert.assertTrue(e.getMessage().contains(
-            "Server requires Kerberos, but this client is not authenticated"));
+        Assert.assertThat(e.getMessage(), CoreMatchers.containsString(
+            "server requires authentication, but client does not have " +
+            "Kerberos credentials (tgt). Authentication tokens were not used " +
+            "because no token is available"));
       }
 
       // If we import the authentication data from the old authenticated client,
@@ -65,6 +70,41 @@ public class TestSecurity extends BaseKuduTest {
       KuduSession session = newClient.newSession();
       session.apply(createBasicSchemaInsert(table, 1));
       session.flush();
+    } finally {
+      // Restore ticket cache for other test cases.
+      System.setProperty(SecurityUtil.KUDU_TICKETCACHE_PROPERTY, oldTicketCache);
+    }
+  }
+
+  /**
+   * Test that if, for some reason, the client has a token but no CA certs, it
+   * will emit an appropriate error message in the exception.
+   */
+  @Test
+  public void testErrorMessageWithNoCaCert() throws Exception {
+    byte[] authnData = client.exportAuthenticationCredentials().join();
+
+    // Remove the CA certs from the credentials.
+    authnData = AuthenticationCredentialsPB.parseFrom(authnData).toBuilder()
+        .clearCaCertDers().build().toByteArray();
+
+    String oldTicketCache = System.getProperty(SecurityUtil.KUDU_TICKETCACHE_PROPERTY);
+    System.clearProperty(SecurityUtil.KUDU_TICKETCACHE_PROPERTY);
+    try {
+      KuduClient newClient = new KuduClient.KuduClientBuilder(masterAddresses).build();
+      newClient.importAuthenticationCredentials(authnData);
+
+      // We shouldn't be able to connect because we have no appropriate CA cert.
+      try {
+        newClient.listTabletServers();
+        Assert.fail("should not have been able to connect to a secure cluster " +
+            "with no credentials");
+      } catch (NonRecoverableException e) {
+        Assert.assertThat(e.getMessage(), CoreMatchers.containsString(
+            "server requires authentication, but client does not have " +
+            "Kerberos credentials (tgt). Authentication tokens were not used " +
+            "because no TLS certificates are trusted by the client"));
+      }
     } finally {
       // Restore ticket cache for other test cases.
       System.setProperty(SecurityUtil.KUDU_TICKETCACHE_PROPERTY, oldTicketCache);
