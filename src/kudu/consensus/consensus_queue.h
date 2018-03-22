@@ -359,6 +359,7 @@ class PeerMessageQueue {
   FRIEND_TEST(ConsensusQueueTest, TestQueueAdvancesCommittedIndex);
   FRIEND_TEST(ConsensusQueueTest, TestQueueMovesWatermarksBackward);
   FRIEND_TEST(ConsensusQueueTest, TestFollowerCommittedIndexAndMetrics);
+  FRIEND_TEST(ConsensusQueueUnitTest, PeerHealthStatus);
   FRIEND_TEST(RaftConsensusQuorumTest, TestReplicasEnforceTheLogMatchingProperty);
 
   // Mode specifies how the queue currently behaves:
