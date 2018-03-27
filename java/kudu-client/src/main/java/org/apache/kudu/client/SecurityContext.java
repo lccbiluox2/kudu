@@ -136,19 +136,26 @@ class SecurityContext {
   public synchronized void importAuthenticationCredentials(byte[] authnData) {
     try {
       AuthenticationCredentialsPB pb = AuthenticationCredentialsPB.parseFrom(authnData);
-      if (authnToken != null) {
+      if (pb.hasAuthnToken() && authnToken != null) {
+        // TODO(todd): also check that, if there is a JAAS subject, that
+        // the subject in the imported authn token matces the Kerberos
+        // principal in the JAAS subject. Alternatively, this could
+        // completely disable the JAAS authentication path (assumedly if
+        // we import a token, we want to _only_ act as the user in that
+        // token, and would rather have a connection failure than flip
+        // back to GSSAPI transparently.
         checkUserMatches(authnToken, pb.getAuthnToken());
       }
-      // TODO(todd): also check that, if there is a JAAS subject, that
-      // the subject in the imported authn token matces the Kerberos
-      // principal in the JAAS subject. Alternatively, this could
-      // completely disable the JAAS authentication path (assumedly if
-      // we import a token, we want to _only_ act as the user in that
-      // token, and would rather have a connection failure than flip
-      // back to GSSAPI transparently.
-      trustCertificates(pb.getCaCertDersList());
-      authnToken = pb.getAuthnToken();
 
+      LOG.debug("Importing authentication credentials with {} authn token, " +
+                "{} cert(s), and realUser={}",
+                pb.hasAuthnToken() ? "one" : "no",
+                pb.getCaCertDersCount(),
+                pb.hasRealUser() ? pb.getRealUser() : "<none>");
+      if (pb.hasAuthnToken()) {
+        authnToken = pb.getAuthnToken();
+      }
+      trustCertificates(pb.getCaCertDersList());
     } catch (InvalidProtocolBufferException | CertificateException e) {
       throw new IllegalArgumentException(e);
     }
