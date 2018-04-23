@@ -56,7 +56,7 @@
 #   BUILD_JAVA        Default: 1
 #     Build and test java code if this is set to 1.
 #
-#   BUILD_GRADLE      Default: 1
+#   BUILD_GRADLE      Default: 0
 #     When building java code, also build the gradle build if this is set
 #     to 1.
 #
@@ -110,7 +110,7 @@ export KUDU_ALLOW_SLOW_TESTS=${KUDU_ALLOW_SLOW_TESTS:-$DEFAULT_ALLOW_SLOW_TESTS}
 export KUDU_COMPRESS_TEST_OUTPUT=${KUDU_COMPRESS_TEST_OUTPUT:-1}
 export TEST_TMPDIR=${TEST_TMPDIR:-/tmp/kudutest-$UID}
 BUILD_JAVA=${BUILD_JAVA:-1}
-BUILD_GRADLE=${BUILD_GRADLE:-1}
+BUILD_GRADLE=${BUILD_GRADLE:-0}
 BUILD_PYTHON=${BUILD_PYTHON:-1}
 BUILD_PYTHON3=${BUILD_PYTHON3:-1}
 
