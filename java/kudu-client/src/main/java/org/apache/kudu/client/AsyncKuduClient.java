@@ -172,14 +172,6 @@ public class AsyncKuduClient implements AutoCloseable {
   private long lastPropagatedTimestamp = NO_TIMESTAMP;
 
   /**
-   * Set to true once we have connected to a master at least once.
-   *
-   * This determines whether exportAuthenticationCredentials() needs to
-   * proactively connect to the cluster to obtain a token.
-   */
-  private volatile boolean hasConnectedToMaster = false;
-
-  /**
    * Semaphore used to rate-limit master lookups
    * Once we have more than this number of concurrent master lookups, we'll
    * start to throttle ourselves slightly.
@@ -654,11 +646,9 @@ public class AsyncKuduClient implements AutoCloseable {
    */
   @InterfaceStability.Unstable
   public Deferred<byte[]> exportAuthenticationCredentials() {
-    // If we've already connected to the master, use the authentication
-    // credentials that we received when we connected.
-    if (hasConnectedToMaster) {
-      return Deferred.fromResult(
-          securityContext.exportAuthenticationCredentials());
+    byte[] authnData = securityContext.exportAuthenticationCredentials();
+    if (authnData != null) {
+      return Deferred.fromResult(authnData);
     }
     // We have no authn data -- connect to the master, which will fetch
     // new info.
@@ -1380,7 +1370,6 @@ public class AsyncKuduClient implements AutoCloseable {
                         e.getMessage());
                   }
                 }
-                hasConnectedToMaster = true;
 
                 // Translate the located master into a TableLocations
                 // since the rest of our locations caching code expects this type.
