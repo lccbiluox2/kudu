@@ -162,7 +162,8 @@ set(KUDU_TEST_LINK_LIBS
   ${KUDU_MIN_TEST_LIBS})
 ADD_KUDU_TEST(ksck-test)
 ADD_KUDU_TEST(ksck_remote-test RESOURCE_LOCK "master-rpc-ports" PROCESSORS 3)
-ADD_KUDU_TEST(kudu-admin-test PROCESSORS 3)
+ADD_KUDU_TEST(kudu-admin-test
+  NUM_SHARDS 4 PROCESSORS 3)
 ADD_KUDU_TEST_DEPENDENCIES(kudu-admin-test
   kudu)
 ADD_KUDU_TEST(kudu-tool-test NUM_SHARDS 4 PROCESSORS 3)
