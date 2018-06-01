@@ -72,6 +72,7 @@ class MockKsckMaster : public KsckMaster {
       : KsckMaster(address),
         fetch_info_status_(Status::OK()) {
     uuid_ = uuid;
+    version_ = "mock-version";
     flags_ = GetFlagsResponsePB{};
   }
 
@@ -103,6 +104,7 @@ class MockKsckMaster : public KsckMaster {
   using KsckMaster::uuid_;
   using KsckMaster::cstate_;
   using KsckMaster::flags_;
+  using KsckMaster::version_;
 };
 
 class MockKsckTabletServer : public KsckTabletServer {
@@ -112,6 +114,7 @@ class MockKsckTabletServer : public KsckTabletServer {
         fetch_info_status_(Status::OK()),
         fetch_info_health_(KsckServerHealth::HEALTHY),
         address_("<mock>") {
+    version_ = "mock-version";
     flags_ = GetFlagsResponsePB{};
   }
 
@@ -153,6 +156,7 @@ class MockKsckTabletServer : public KsckTabletServer {
   Status fetch_info_status_;
   KsckServerHealth fetch_info_health_;
   using KsckTabletServer::flags_;
+  using KsckTabletServer::version_;
 
  private:
   const string address_;
@@ -1447,7 +1451,7 @@ TEST_F(KsckTest, TestTabletFilters) {
   CreateOneSmallReplicatedTable();
 
   ksck_->set_tablet_id_filters({ "tablet-id-0", "tablet-id-1" });
-  ASSERT_OK(ksck_->RunAndPrintResults());
+  ASSERT_OK(RunKsck());
   ASSERT_STR_CONTAINS(err_stream_.str(),
       "                | Total Count\n"
       "----------------+-------------\n"
@@ -1456,6 +1460,28 @@ TEST_F(KsckTest, TestTabletFilters) {
       " Tables         | 1\n"
       " Tablets        | 2\n"
       " Replicas       | 6\n");
+
+  CheckJsonStringVsKsckResults(KsckResultsToJsonString(), ksck_->results());
+}
+
+TEST_F(KsckTest, TestVersionCheck) {
+  for (int i : {1, 2}) {
+    shared_ptr<MockKsckMaster> master =
+        static_pointer_cast<MockKsckMaster>(cluster_->masters_[i]);
+    master->version_ = Substitute("v$0", i);
+  }
+
+  ASSERT_OK(RunKsck());
+  ASSERT_STR_CONTAINS(err_stream_.str(),
+      "Version Summary\n"
+      "   Version    |                                Servers\n"
+      "--------------+------------------------------------------------------------------------\n"
+      " mock-version | master@master-0, tserver@<mock>, tserver@<mock>, and 1 other server(s)\n"
+      " v1           | master@master-1\n"
+      " v2           | master@master-2");
+  ASSERT_STR_CONTAINS(err_stream_.str(), "version check error: not all servers "
+                                         "are running the same version: "
+                                         "3 different versions were seen");
 
   CheckJsonStringVsKsckResults(KsckResultsToJsonString(), ksck_->results());
 }

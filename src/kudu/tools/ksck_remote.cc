@@ -55,7 +55,8 @@
 #include "kudu/tserver/tserver_service.proxy.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
-#include "kudu/util/slice.h"
+#include "kudu/util/net/sockaddr.h"
+#include "kudu/util/version_info.pb.h"
 
 DECLARE_int64(timeout_ms); // defined in tool_action_common
 DEFINE_bool(checksum_cache_blocks, false, "Should the checksum scanners cache the read blocks");
@@ -121,6 +122,7 @@ Status RemoteKsckMaster::FetchInfo() {
   rpc.set_timeout(GetDefaultTimeout());
   RETURN_NOT_OK(generic_proxy_->GetStatus(req, &resp, &rpc));
   uuid_ = resp.status().node_instance().permanent_uuid();
+  version_ = resp.status().version_info().version_string();
   state_ = KsckFetchState::FETCHED;
   return Status::OK();
 }
@@ -184,6 +186,7 @@ Status RemoteKsckTabletServer::FetchInfo(KsckServerHealth* health) {
     rpc.set_timeout(GetDefaultTimeout());
     RETURN_NOT_OK_PREPEND(generic_proxy_->GetStatus(req, &resp, &rpc),
                           "could not get status from server");
+    version_ = resp.status().version_info().version_string();
     string response_uuid = resp.status().node_instance().permanent_uuid();
     if (response_uuid != uuid()) {
       *health = KsckServerHealth::WRONG_SERVER_UUID;
