@@ -89,6 +89,7 @@
 #include "kudu/tablet/tablet_replica.h"
 #include "kudu/tools/tool.pb.h"
 #include "kudu/tools/tool_action_common.h"
+#include "kudu/tools/tool_replica_util.h"
 #include "kudu/tools/tool_test_util.h"
 #include "kudu/tserver/mini_tablet_server.h"
 #include "kudu/tserver/tablet_server.h"
@@ -117,36 +118,47 @@
 
 DECLARE_string(block_manager);
 
-namespace kudu {
+METRIC_DECLARE_counter(bloom_lookups);
+METRIC_DECLARE_entity(tablet);
 
-namespace tserver {
-class TabletServerServiceProxy;
-}
-
-namespace tools {
-
-using cfile::CFileWriter;
-using cfile::StringDataGenerator;
-using cfile::WriterOptions;
-using client::KuduSchema;
-using client::KuduSchemaBuilder;
-using client::sp::shared_ptr;
-using cluster::ExternalMiniCluster;
-using cluster::ExternalMiniClusterOptions;
-using cluster::InternalMiniCluster;
-using cluster::InternalMiniClusterOptions;
-using consensus::OpId;
-using consensus::RECEIVED_OPID;
-using consensus::ReplicateRefPtr;
-using consensus::ReplicateMsg;
-using fs::BlockDeletionTransaction;
-using fs::FsReport;
-using fs::WritableBlock;
-using itest::MiniClusterFsInspector;
-using itest::TServerDetails;
-using log::Log;
-using log::LogOptions;
-using rpc::RpcController;
+using kudu::cfile::CFileWriter;
+using kudu::cfile::StringDataGenerator;
+using kudu::cfile::WriterOptions;
+using kudu::client::KuduClient;
+using kudu::client::KuduClientBuilder;
+using kudu::client::KuduSchema;
+using kudu::client::KuduSchemaBuilder;
+using kudu::client::KuduTable;
+using kudu::client::sp::shared_ptr;
+using kudu::cluster::ExternalMiniCluster;
+using kudu::cluster::ExternalMiniClusterOptions;
+using kudu::cluster::ExternalTabletServer;
+using kudu::cluster::InternalMiniCluster;
+using kudu::cluster::InternalMiniClusterOptions;
+using kudu::consensus::OpId;
+using kudu::consensus::RECEIVED_OPID;
+using kudu::consensus::ReplicateMsg;
+using kudu::consensus::ReplicateRefPtr;
+using kudu::fs::BlockDeletionTransaction;
+using kudu::fs::FsReport;
+using kudu::fs::WritableBlock;
+using kudu::itest::MiniClusterFsInspector;
+using kudu::itest::TServerDetails;
+using kudu::log::Log;
+using kudu::log::LogOptions;
+using kudu::rpc::RpcController;
+using kudu::tablet::LocalTabletWriter;
+using kudu::tablet::Tablet;
+using kudu::tablet::TabletDataState;
+using kudu::tablet::TabletHarness;
+using kudu::tablet::TabletMetadata;
+using kudu::tablet::TabletReplica;
+using kudu::tablet::TabletSuperBlockPB;
+using kudu::tserver::DeleteTabletRequestPB;
+using kudu::tserver::DeleteTabletResponsePB;
+using kudu::tserver::ListTabletsResponsePB;
+using kudu::tserver::MiniTabletServer;
+using kudu::tserver::WriteRequestPB;
 using std::back_inserter;
 using std::copy;
 using std::ostringstream;
@@ -156,20 +168,9 @@ using std::unique_ptr;
 using std::unordered_map;
 using std::vector;
 using strings::Substitute;
-using tablet::LocalTabletWriter;
-using tablet::Tablet;
-using tablet::TabletDataState;
-using tablet::TabletHarness;
-using tablet::TabletMetadata;
-using tablet::TabletReplica;
-using tablet::TabletSuperBlockPB;
-using tserver::DeleteTabletRequestPB;
-using tserver::DeleteTabletResponsePB;
-using tserver::MiniTabletServer;
-using tserver::WriteRequestPB;
-using tserver::ListTabletsRequestPB;
-using tserver::ListTabletsResponsePB;
-using tserver::TabletServerServiceProxy;
+
+namespace kudu {
+namespace tools {
 
 class ToolTest : public KuduTest {
  public:
@@ -1357,7 +1358,7 @@ void ToolTest::RunLoadgen(int num_tservers,
         ColumnSchema("binary_val", BINARY),
       }, 1);
 
-    shared_ptr<client::KuduClient> client;
+    shared_ptr<KuduClient> client;
     ASSERT_OK(cluster_->CreateClient(nullptr, &client));
     KuduSchema client_schema(client::KuduSchemaFromSchema(kSchema));
     unique_ptr<client::KuduTableCreator> table_creator(
@@ -2001,13 +2002,13 @@ TEST_P(ControlShellToolTest, TestControlShell) {
 
   // Create a table.
   {
-    client::KuduClientBuilder client_builder;
+    KuduClientBuilder client_builder;
     for (const auto& e : masters) {
       HostPort hp;
       ASSERT_OK(HostPortFromPB(e.bound_rpc_address(), &hp));
       client_builder.add_master_server_addr(hp.ToString());
     }
-    shared_ptr<client::KuduClient> client;
+    shared_ptr<KuduClient> client;
     ASSERT_OK(client_builder.Build(&client));
     KuduSchemaBuilder schema_builder;
     schema_builder.AddColumn("foo")
@@ -2313,7 +2314,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   ASSERT_STR_CONTAINS(s.ToString(), "one or more data dirs may have been removed");
 
   // Delete the second table and wait for all of its tablets to be deleted.
-  shared_ptr<client::KuduClient> client;
+  shared_ptr<KuduClient> client;
   ASSERT_OK(mini_cluster_->CreateClient(nullptr, &client));
   ASSERT_OK(client->DeleteTable(kTableBar));
   ASSERT_EVENTUALLY([&]{
@@ -2446,7 +2447,7 @@ TEST_F(ToolTest, TestReplaceTablet) {
 
   // Sanity check: there should be no more rows than we inserted before the replace.
   // TODO(wdberkeley): Should also be possible to keep inserting through a replace.
-  client::sp::shared_ptr<client::KuduTable> workload_table;
+  client::sp::shared_ptr<KuduTable> workload_table;
   ASSERT_OK(workload.client()->OpenTable(workload.table_name(), &workload_table));
   ASSERT_GE(workload.rows_inserted(), CountTableRows(workload_table.get()));
 }
@@ -2494,6 +2495,54 @@ TEST_F(ToolTest, TestGetFlags) {
     ASSERT_STR_CONTAINS(out, "help,false,true");
     ASSERT_STR_NOT_MATCHES(out, "logemaillevel,*");
     ASSERT_STR_CONTAINS(out, Substitute("fs_wal_dir,$0,false", wal_dir));
+  }
+}
+
+class Is343ReplicaUtilTest :
+    public ToolTest,
+    public ::testing::WithParamInterface<bool> {
+};
+INSTANTIATE_TEST_CASE_P(, Is343ReplicaUtilTest, ::testing::Bool());
+TEST_P(Is343ReplicaUtilTest, Is343Cluster) {
+  constexpr auto kReplicationFactor = 3;
+  const auto is_343_scheme = GetParam();
+
+  ExternalMiniClusterOptions opts;
+  opts.num_tablet_servers = kReplicationFactor;
+  opts.extra_master_flags = {
+    Substitute("--raft_prepare_replacement_before_eviction=$0", is_343_scheme),
+  };
+  opts.extra_tserver_flags = {
+    Substitute("--raft_prepare_replacement_before_eviction=$0", is_343_scheme),
+  };
+  NO_FATALS(StartExternalMiniCluster(opts));
+  const auto& master_addr = cluster_->master()->bound_rpc_addr().ToString();
+
+  {
+    const string empty_name = "";
+    bool is_343 = false;
+    const auto s = Is343SchemeCluster({ master_addr }, empty_name, &is_343);
+    ASSERT_TRUE(s.IsNotFound()) << s.ToString();
+  }
+
+  {
+    bool is_343 = false;
+    const auto s = Is343SchemeCluster({ master_addr }, boost::none, &is_343);
+    ASSERT_TRUE(s.IsIncomplete()) << s.ToString();
+    ASSERT_STR_CONTAINS(s.ToString(), "not a single table found");
+  }
+
+  // Create a table.
+  TestWorkload workload(cluster_.get());
+  workload.set_num_replicas(kReplicationFactor);
+  workload.set_table_name("is_343_test_table");
+  workload.Setup();
+
+  {
+    bool is_343 = false;
+    const auto s = Is343SchemeCluster({ master_addr }, boost::none, &is_343);
+    ASSERT_TRUE(s.ok()) << s.ToString();
+    ASSERT_EQ(is_343_scheme, is_343);
   }
 }
 
