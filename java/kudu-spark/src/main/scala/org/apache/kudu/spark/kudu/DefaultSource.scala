@@ -51,8 +51,13 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
   val OPERATION = "kudu.operation"
   val FAULT_TOLERANT_SCANNER = "kudu.faultTolerantScan"
   val SCAN_LOCALITY = "kudu.scanLocality"
+  val SCAN_REQUEST_TIMEOUT_MS = "kudu.scanRequestTimeoutMs"
 
   def defaultMasterAddrs: String = InetAddress.getLocalHost.getCanonicalHostName
+
+  def getScanRequestTimeoutMs(parameters: Map[String, String]): Option[Long] = {
+    parameters.get(SCAN_REQUEST_TIMEOUT_MS).map(_.toLong)
+  }
 
   /**
     * Construct a BaseRelation using the provided context and parameters.
@@ -62,8 +67,7 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
     * @return           a BaseRelation Object
     */
   override def createRelation(sqlContext: SQLContext,
-                              parameters: Map[String, String]):
-  BaseRelation = {
+                              parameters: Map[String, String]): BaseRelation = {
     val tableName = parameters.getOrElse(TABLE_KEY,
       throw new IllegalArgumentException(
         s"Kudu table name must be specified in create options using key '$TABLE_KEY'"))
@@ -74,7 +78,7 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
     val scanLocality = getScanLocalityType(parameters.getOrElse(SCAN_LOCALITY, "closest_replica"))
 
     new KuduRelation(tableName, kuduMaster, faultTolerantScanner,
-      scanLocality, operationType, None)(sqlContext)
+      scanLocality, getScanRequestTimeoutMs(parameters), operationType, None)(sqlContext)
   }
 
   /**
@@ -110,7 +114,7 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
     val scanLocality = getScanLocalityType(parameters.getOrElse(SCAN_LOCALITY, "closest_replica"))
 
     new KuduRelation(tableName, kuduMaster, faultTolerantScanner,
-      scanLocality, operationType, Some(schema))(sqlContext)
+      scanLocality, getScanRequestTimeoutMs(parameters), operationType, Some(schema))(sqlContext)
   }
 
   private def getOperationType(opParam: String): OperationType = {
@@ -142,6 +146,7 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
   *                             otherwise, use non fault tolerant one
   * @param scanLocality If true scan locality is enabled, so that the scan will
   *                     take place at the closest replica.
+  * @param scanRequestTimeoutMs Maximum time allowed per scan request, in milliseconds
   * @param operationType The default operation type to perform when writing to the relation
   * @param userSchema A schema used to select columns for the relation
   * @param sqlContext SparkSQL context
@@ -151,6 +156,7 @@ class KuduRelation(private val tableName: String,
                    private val masterAddrs: String,
                    private val faultTolerantScanner: Boolean,
                    private val scanLocality: ReplicaSelection,
+                   private[kudu] val scanRequestTimeoutMs: Option[Long],
                    private val operationType: OperationType,
                    private val userSchema: Option[StructType])(
                    val sqlContext: SQLContext)
@@ -198,7 +204,8 @@ class KuduRelation(private val tableName: String,
   override def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row] = {
     val predicates = filters.flatMap(filterToPredicate)
     new KuduRDD(context, 1024 * 1024 * 20, requiredColumns, predicates,
-                table, faultTolerantScanner, scanLocality, sqlContext.sparkContext)
+                table, faultTolerantScanner, scanLocality, scanRequestTimeoutMs,
+                sqlContext.sparkContext)
   }
 
   /**
