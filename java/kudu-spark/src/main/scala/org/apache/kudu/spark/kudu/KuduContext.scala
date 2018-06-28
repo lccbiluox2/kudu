@@ -24,19 +24,16 @@ import javax.security.auth.login.{AppConfigurationEntry, Configuration, LoginCon
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
-
 import org.apache.hadoop.util.ShutdownHookManager
 import org.apache.kudu.ColumnTypeAttributes.ColumnTypeAttributesBuilder
 import org.apache.spark.{AccumulatorParam, SparkContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types.{DataType, DataTypes, DecimalType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.yetus.audience.InterfaceStability
+import org.apache.yetus.audience.{InterfaceAudience, InterfaceStability}
 import org.slf4j.{Logger, LoggerFactory}
-
 import org.apache.kudu.client.SessionConfiguration.FlushMode
 import org.apache.kudu.client._
-import org.apache.kudu.spark.kudu
 import org.apache.kudu.{ColumnSchema, Schema, Type}
 
 /**
@@ -48,7 +45,10 @@ import org.apache.kudu.{ColumnSchema, Schema, Type}
   */
 @InterfaceStability.Unstable
 class KuduContext(val kuduMaster: String,
-                  sc: SparkContext) extends Serializable {
+                  sc: SparkContext,
+                  val socketReadTimeoutMs: Option[Long]) extends Serializable {
+
+  def this(kuduMaster: String, sc: SparkContext) = this(kuduMaster, sc, None)
 
   /**
     * TimestampAccumulator accumulates the maximum value of client's
@@ -75,8 +75,6 @@ class KuduContext(val kuduMaster: String,
 
   val timestampAccumulator = sc.accumulator(0L)(TimestampAccumulator)
 
-  import kudu.KuduContext._
-
   @Deprecated()
   def this(kuduMaster: String) {
     this(kuduMaster, new SparkContext())
@@ -84,8 +82,8 @@ class KuduContext(val kuduMaster: String,
 
   @transient lazy val syncClient: KuduClient = asyncClient.syncClient()
 
-  @transient lazy val asyncClient = {
-    val c = KuduConnection.getAsyncClient(kuduMaster)
+  @transient lazy val asyncClient: AsyncKuduClient = {
+    val c = KuduClientCache.getAsyncClient(kuduMaster, socketReadTimeoutMs)
     if (authnCredentials != null) {
       c.importAuthenticationCredentials(authnCredentials)
     }
@@ -94,7 +92,7 @@ class KuduContext(val kuduMaster: String,
 
   // Visible for testing.
   private[kudu] val authnCredentials : Array[Byte] = {
-    Subject.doAs(getSubject(sc), new PrivilegedAction[Array[Byte]] {
+    Subject.doAs(KuduContext.getSubject(sc), new PrivilegedAction[Array[Byte]] {
       override def run(): Array[Byte] = syncClient.exportAuthenticationCredentials()
     })
   }
@@ -115,7 +113,7 @@ class KuduContext(val kuduMaster: String,
     // TODO: localityScan, etc) to KuduRDD
     new KuduRDD(this, 1024*1024*20, columnProjection.toArray, Array(),
                 syncClient.openTable(tableName), false, ReplicaSelection.LEADER_ONLY,
-                None, sc)
+                None, None, sc)
   }
 
   /**
@@ -385,8 +383,8 @@ private object KuduContext {
   }
 }
 
-private object KuduConnection {
-  private[kudu] val asyncCache = new mutable.HashMap[String, AsyncKuduClient]()
+private object KuduClientCache {
+  private case class CacheKey(kuduMaster: String, socketReadTimeoutMs: Option[Long])
 
   /**
     * Set to
@@ -397,17 +395,29 @@ private object KuduConnection {
     */
   private val ShutdownHookPriority = 100
 
-  def getAsyncClient(kuduMaster: String): AsyncKuduClient = {
-    asyncCache.synchronized {
-      if (!asyncCache.contains(kuduMaster)) {
-        val asyncClient = new AsyncKuduClient.AsyncKuduClientBuilder(kuduMaster).build()
+  private val clientCache = new mutable.HashMap[CacheKey, AsyncKuduClient]()
+
+  // Visible for testing.
+  private[kudu] def clearCacheForTests() = clientCache.clear()
+
+  def getAsyncClient(kuduMaster: String, socketReadTimeoutMs: Option[Long]): AsyncKuduClient = {
+    val cacheKey = CacheKey(kuduMaster, socketReadTimeoutMs)
+    clientCache.synchronized {
+      if (!clientCache.contains(cacheKey)) {
+        val builder = new AsyncKuduClient.AsyncKuduClientBuilder(kuduMaster)
+        socketReadTimeoutMs match {
+          case Some(timeout) => builder.defaultSocketReadTimeoutMs(timeout)
+          case None =>
+        }
+
+        val asyncClient = builder.build()
         ShutdownHookManager.get().addShutdownHook(
           new Runnable {
             override def run() = asyncClient.close()
           }, ShutdownHookPriority)
-        asyncCache.put(kuduMaster, asyncClient)
+        clientCache.put(cacheKey, asyncClient)
       }
-      return asyncCache(kuduMaster)
+      return clientCache(cacheKey)
     }
   }
 }
