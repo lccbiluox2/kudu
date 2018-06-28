@@ -52,11 +52,16 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
   val FAULT_TOLERANT_SCANNER = "kudu.faultTolerantScan"
   val SCAN_LOCALITY = "kudu.scanLocality"
   val SCAN_REQUEST_TIMEOUT_MS = "kudu.scanRequestTimeoutMs"
+  val SOCKET_READ_TIMEOUT_MS = "kudu.socketReadTimeoutMs"
 
   def defaultMasterAddrs: String = InetAddress.getLocalHost.getCanonicalHostName
 
   def getScanRequestTimeoutMs(parameters: Map[String, String]): Option[Long] = {
     parameters.get(SCAN_REQUEST_TIMEOUT_MS).map(_.toLong)
+  }
+
+  def getSocketReadTimeoutMs(parameters: Map[String, String]): Option[Long] = {
+    parameters.get(SOCKET_READ_TIMEOUT_MS).map(_.toLong)
   }
 
   /**
@@ -78,7 +83,8 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
     val scanLocality = getScanLocalityType(parameters.getOrElse(SCAN_LOCALITY, "closest_replica"))
 
     new KuduRelation(tableName, kuduMaster, faultTolerantScanner,
-      scanLocality, getScanRequestTimeoutMs(parameters), operationType, None)(sqlContext)
+      scanLocality, getScanRequestTimeoutMs(parameters), getSocketReadTimeoutMs(parameters),
+      operationType, None)(sqlContext)
   }
 
   /**
@@ -114,7 +120,8 @@ class DefaultSource extends RelationProvider with CreatableRelationProvider
     val scanLocality = getScanLocalityType(parameters.getOrElse(SCAN_LOCALITY, "closest_replica"))
 
     new KuduRelation(tableName, kuduMaster, faultTolerantScanner,
-      scanLocality, getScanRequestTimeoutMs(parameters), operationType, Some(schema))(sqlContext)
+      scanLocality, getScanRequestTimeoutMs(parameters), getSocketReadTimeoutMs(parameters),
+      operationType, Some(schema))(sqlContext)
   }
 
   private def getOperationType(opParam: String): OperationType = {
@@ -157,6 +164,7 @@ class KuduRelation(private val tableName: String,
                    private val faultTolerantScanner: Boolean,
                    private val scanLocality: ReplicaSelection,
                    private[kudu] val scanRequestTimeoutMs: Option[Long],
+                   private[kudu] val socketReadTimeoutMs: Option[Long],
                    private val operationType: OperationType,
                    private val userSchema: Option[StructType])(
                    val sqlContext: SQLContext)
@@ -164,13 +172,13 @@ class KuduRelation(private val tableName: String,
     with PrunedFilteredScan
     with InsertableRelation {
 
-  import KuduRelation._
+  private val context: KuduContext = new KuduContext(masterAddrs, sqlContext.sparkContext,
+                                                     socketReadTimeoutMs)
 
-  private val context: KuduContext = new KuduContext(masterAddrs, sqlContext.sparkContext)
   private val table: KuduTable = context.syncClient.openTable(tableName)
 
   override def unhandledFilters(filters: Array[Filter]): Array[Filter] =
-    filters.filterNot(supportsFilter)
+    filters.filterNot(KuduRelation.supportsFilter)
 
   /**
     * Generates a SparkSQL schema object so SparkSQL knows what is being
@@ -190,7 +198,7 @@ class KuduRelation(private val tableName: String,
 
   def kuduColumnToSparkField: (ColumnSchema) => StructField = {
     columnSchema =>
-      val sparkType = kuduTypeToSparkType(columnSchema.getType, columnSchema.getTypeAttributes)
+      val sparkType = KuduRelation.kuduTypeToSparkType(columnSchema.getType, columnSchema.getTypeAttributes)
       new StructField(columnSchema.getName, sparkType, columnSchema.isNullable)
   }
 
@@ -205,7 +213,7 @@ class KuduRelation(private val tableName: String,
     val predicates = filters.flatMap(filterToPredicate)
     new KuduRDD(context, 1024 * 1024 * 20, requiredColumns, predicates,
                 table, faultTolerantScanner, scanLocality, scanRequestTimeoutMs,
-                sqlContext.sparkContext)
+                socketReadTimeoutMs, sqlContext.sparkContext)
   }
 
   /**
@@ -274,7 +282,8 @@ class KuduRelation(private val tableName: String,
       case value: Short => KuduPredicate.newComparisonPredicate(columnSchema, operator, value)
       case value: Int => KuduPredicate.newComparisonPredicate(columnSchema, operator, value)
       case value: Long => KuduPredicate.newComparisonPredicate(columnSchema, operator, value)
-      case value: Timestamp => KuduPredicate.newComparisonPredicate(columnSchema, operator, timestampToMicros(value))
+      case value: Timestamp => KuduPredicate.newComparisonPredicate(columnSchema, operator,
+        KuduRelation.timestampToMicros(value))
       case value: Float => KuduPredicate.newComparisonPredicate(columnSchema, operator, value)
       case value: Double => KuduPredicate.newComparisonPredicate(columnSchema, operator, value)
       case value: String => KuduPredicate.newComparisonPredicate(columnSchema, operator, value)
