@@ -48,7 +48,6 @@
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/gutil/strings/util.h"
 #include "kudu/integration-tests/cluster_itest_util.h"
 #include "kudu/integration-tests/cluster_verifier.h"
 #include "kudu/integration-tests/test_workload.h"
@@ -100,6 +99,7 @@ using std::atomic;
 using std::back_inserter;
 using std::copy;
 using std::deque;
+using std::endl;
 using std::ostringstream;
 using std::string;
 using std::thread;
@@ -1330,6 +1330,14 @@ TEST_F(AdminCliTest, TestListTablesDetail) {
   }
 }
 
+static string ToolRunInfo(const Status& s, const string& out, const string& err) {
+  ostringstream str;
+  str << s.ToString() << endl;
+  str << "stdout: " << out << endl;
+  str << "stderr: " << err << endl;
+  return str.str();
+}
+
 // Make sure the rebalancer doesn't start if a tablet server is down.
 class RebalanceStartCriteriaTest :
     public AdminCliTest,
@@ -1358,13 +1366,14 @@ TEST_P(RebalanceStartCriteriaTest, TabletServerIsDown) {
     ts->Shutdown();
   }
 
+  string out;
   string err;
   Status s = RunKuduTool({
     "cluster",
     "rebalance",
     cluster_->master()->bound_rpc_addr().ToString()
-  }, nullptr, &err);
-  ASSERT_TRUE(s.IsRuntimeError()) << s.ToString();
+  }, &out, &err);
+  ASSERT_TRUE(s.IsRuntimeError()) << ToolRunInfo(s, out, err);
   const auto err_msg_pattern = Substitute(
       "Illegal state: tablet server .* \\($0\\): "
       "unacceptable health status UNAVAILABLE",
@@ -1500,7 +1509,7 @@ TEST_P(RebalanceParamTest, Rebalance) {
     string out;
     string err;
     const Status s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ":" << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out, "rebalancing is complete: cluster is balanced")
         << "stderr: " << err;
   }
@@ -1511,7 +1520,7 @@ TEST_P(RebalanceParamTest, Rebalance) {
     string out;
     string err;
     const Status s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ":" << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out,
         "rebalancing is complete: cluster is balanced (moved 0 replicas)")
         << "stderr: " << err;
@@ -1531,7 +1540,7 @@ TEST_P(RebalanceParamTest, Rebalance) {
     string out;
     string err;
     const Status s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ":" << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out, "rebalancing is complete: cluster is balanced")
         << "stderr: " << err;
     // The cluster was un-balanced, so many replicas should have been moved.
@@ -1569,6 +1578,8 @@ class RebalancingTest :
   }
 
  protected:
+  static const char* const kExitOnSignalStr;
+
   void Prepare(const vector<string>& extra_tserver_flags = {},
                const vector<string>& extra_master_flags = {}) {
     copy(extra_tserver_flags.begin(), extra_tserver_flags.end(),
@@ -1615,6 +1626,7 @@ class RebalancingTest :
   vector<string> tserver_flags_;
   vector<string> master_flags_;
 };
+const char* const RebalancingTest::kExitOnSignalStr = "kudu: process exited on signal";
 
 // Make sure the rebalancer is able to do its job if running concurrently
 // with DDL activity on the cluster.
@@ -1780,7 +1792,7 @@ TEST_P(DDLDuringRebalancingTest, TablesCreatedAndDeletedDuringRebalancing) {
     string out;
     string err;
     const auto s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ": " << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out, "rebalancing is complete: cluster is balanced")
         << "stderr: " << err;
   }
@@ -1791,7 +1803,7 @@ TEST_P(DDLDuringRebalancingTest, TablesCreatedAndDeletedDuringRebalancing) {
     string out;
     string err;
     const auto s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ": " << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out,
         "rebalancing is complete: cluster is balanced (moved 0 replicas)")
         << "stderr: " << err;
@@ -1828,21 +1840,18 @@ TEST_P(ConcurrentRebalancersTest, TwoConcurrentRebalancers) {
   };
 
   const auto runner_func = [&]() {
+    string out;
     string err;
-    const auto s = RunKuduTool(tool_args, nullptr, &err);
-
-    ostringstream os;
-    os << "rebalancer status: " << s.ToString();
-    // One might expect a bad status returned: e.g., due to some race so
-    // the rebalancer didn't able to make progress for more than
-    // --max_staleness_interval_sec, etc.
+    const auto s = RunKuduTool(tool_args, &out, &err);
     if (!s.ok()) {
-      os << " : " << err;
+      // One might expect a bad status returned: e.g., due to some race so
+      // the rebalancer didn't able to make progress for more than
+      // --max_staleness_interval_sec, etc.
+      LOG(INFO) << "rebalancer run info: " << ToolRunInfo(s, out, err);
     }
-    LOG(INFO) << os.str();
 
     // Should not exit on a signal: not expecting SIGSEGV, SIGABRT, etc.
-    return !MatchPattern(err, "*kudu: process exited on signal*");
+    return s.ToString().find(kExitOnSignalStr) == string::npos;
   };
 
   CountDownLatch start_synchronizer(1);
@@ -1867,7 +1876,7 @@ TEST_P(ConcurrentRebalancersTest, TwoConcurrentRebalancers) {
     string out;
     string err;
     const auto s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ": " << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out, "rebalancing is complete: cluster is balanced")
         << "stderr: " << err;
   }
@@ -1880,7 +1889,7 @@ TEST_P(ConcurrentRebalancersTest, TwoConcurrentRebalancers) {
     string out;
     string err;
     const auto s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString() << ": " << err;
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out,
         "rebalancing is complete: cluster is balanced (moved 0 replicas)")
         << "stderr: " << err;
@@ -1920,13 +1929,14 @@ TEST_P(TserverGoesDownDuringRebalancingTest, TserverDown) {
   // Pre-condition: 'kudu cluster ksck' should be happy with the cluster state
   // shortly after initial setup.
   ASSERT_EVENTUALLY([&]() {
+    string out;
     string err;
     const auto s = RunKuduTool({
       "cluster",
       "ksck",
       cluster_->master()->bound_rpc_addr().ToString(),
-    }, nullptr, &err);
-    ASSERT_TRUE(s.ok()) << "stderr: " << err;
+    }, &out, &err);
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
   });
 
   Random r(SeedRandom());
@@ -1959,13 +1969,13 @@ TEST_P(TserverGoesDownDuringRebalancingTest, TserverDown) {
       // server goes down.
       "--max_moves_per_server=1",
     }, &out, &err);
-    ASSERT_TRUE(s.IsRuntimeError()) << s.ToString();
+    ASSERT_TRUE(s.IsRuntimeError()) << ToolRunInfo(s, out, err);
+
+    // The rebalancer tool should not crash.
+    ASSERT_STR_NOT_CONTAINS(s.ToString(), kExitOnSignalStr);
     ASSERT_STR_MATCHES(
         err, "Illegal state: tablet server .* \\(.*\\): "
              "unacceptable health status UNAVAILABLE");
-
-    // The rebalancer tool should not crash.
-    ASSERT_STR_NOT_CONTAINS(err, "kudu: process exited on signal");
   }
 
   run = false;
@@ -2010,9 +2020,10 @@ TEST_P(TserverAddedDuringRebalancingTest, TserverStarts) {
   atomic<bool> run(true);
   thread runner([&]() {
     while (run) {
+      string out;
       string err;
-      const auto s = RunKuduTool(tool_args, nullptr, &err);
-      CHECK(s.ok()) << s.ToString() << "stderr: " << err;
+      const auto s = RunKuduTool(tool_args, &out, &err);
+      CHECK(s.ok()) << ToolRunInfo(s, out, err);
     }
   });
   auto runner_cleanup = MakeScopedCleanup([&]() {
@@ -2036,7 +2047,7 @@ TEST_P(TserverAddedDuringRebalancingTest, TserverStarts) {
     string out;
     string err;
     const auto s = RunKuduTool(tool_args, &out, &err);
-    ASSERT_TRUE(s.ok()) << s.ToString();
+    ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
     ASSERT_STR_CONTAINS(out,
         "rebalancing is complete: cluster is balanced (moved 0 replicas)")
         << "stderr: " << err;
@@ -2124,17 +2135,20 @@ TEST_P(RebalancerAndSingleReplicaTablets, SingleReplicasStayOrMove) {
     cluster_->master()->bound_rpc_addr().ToString(),
     Substitute("--move_single_replicas=$0", move_single_replica),
   }, &out, &err);
-  ASSERT_TRUE(s.ok()) << s.ToString() << ":" << err;
-  ASSERT_STR_CONTAINS(out, "rebalancing is complete: cluster is balanced");
+  ASSERT_TRUE(s.ok()) << ToolRunInfo(s, out, err);
+  ASSERT_STR_CONTAINS(out, "rebalancing is complete: cluster is balanced")
+      << "stderr: " << err;
   if (move_single_replica == "enabled" ||
       (move_single_replica == "auto" && is_343_scheme)) {
     // Should move appropriate replicas of single-replica tablets.
     ASSERT_STR_NOT_CONTAINS(out,
-        "rebalancing is complete: cluster is balanced (moved 0 replicas)");
+        "rebalancing is complete: cluster is balanced (moved 0 replicas)")
+        << "stderr: " << err;
     ASSERT_STR_NOT_CONTAINS(err, "has single replica, skipping");
   } else {
     ASSERT_STR_CONTAINS(out,
-        "rebalancing is complete: cluster is balanced (moved 0 replicas)");
+        "rebalancing is complete: cluster is balanced (moved 0 replicas)")
+        << "stderr: " << err;
     ASSERT_STR_MATCHES(err, "tablet .* of table '.*' (.*) has single replica, skipping");
   }
 
