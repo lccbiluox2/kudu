@@ -18,11 +18,12 @@
   "name" : "KUDU",
   "label" : "Kudu",
   "description" : "Kudu is a true column store for the Hadoop ecosystem.",
-  "version" : "5.15.0",
+  "version" : "5.16.0",
   "compatibility" : {
     "generation" : 1,
     "cdhVersion" : {
-      "min" : "5.11.0"
+      "min" : "5.11.0",
+      "max" : "5.16.0"
     }
   },
   "runAs" : {
@@ -36,6 +37,16 @@
   },
   "icon" : "images/icon.png",
   "kerberos" : "${enable_security}",
+  "commands" : [
+    {
+      "name" : "kudu_svc_ksck_cmd",
+      "label" : "Run Kudu ksck",
+      "description" : "Run the Kudu system check (ksck)",
+      "roleName" : "KUDU_MASTER",
+      "roleCommand" : "kudu_master_ksck_cmd",
+      "runMode" : "single"
+    }
+  ],
   "parameters" : [
     {
       "name" : "enable_core_dump",
@@ -117,6 +128,19 @@
 	"percentGreenForGreen" : 80.1,
 	"percentYellowGreenForYellow" : 60.0
       },
+      "commands" : [
+        {
+          "name" : "kudu_master_ksck_cmd",
+          "label" : "Run Kudu ksck",
+          "description" : "Run the Kudu system check, ksck",
+          "expectedExitCodes" : [0],
+          "requiredRoleState" : "running",
+          "commandRunner" : {
+            "program" : "scripts/kudu.sh",
+            "args" : ["ksck"]
+          }
+        }
+      ],
       "parameters" : [
         {
           "name" : "webserver_port",
@@ -188,12 +212,12 @@
         }
       ],
       "supportBundle" : {
-        "description": "Runs and collects the output from ksck, a tool for diagnosing the health of a Kudu cluster.",
-        "runMode" : "single",
+        "description": "Collects ksck and the diagnostics logs for support bundles.",
+        "runMode" : "all",
         "runner" : {
           "program": "scripts/kudu.sh",
           "args": [
-            "diagnostics",
+            "diagnostics-master",
             "${log_dir}"
           ]
         }
@@ -369,6 +393,17 @@
          "certificateLocationConfigName" : "webserver_certificate_file",
          "privateKeyPasswordConfigName" : "webserver_private_key_password_cmd",
          "privateKeyPasswordScriptBased" : "true"
+      },
+      "supportBundle" : {
+        "description": "Collects the diagnostics logs for support bundles.",
+        "runMode" : "all",
+        "runner" : {
+        "program": "scripts/kudu.sh",
+          "args": [
+            "diagnostics-tserver",
+            "${log_dir}"
+          ]
+        }
       },
       "configWriter" : {
         "generators" : [

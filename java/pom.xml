@@ -366,7 +366,9 @@
         <profile>
             <id>buildCSD</id>
             <modules>
-                <module>kudu-csd</module>
+                <!-- Note that the 5.16 CSD covers 5.[16, inf). -->
+                <module>kudu-csd-5.16</module>
+                <module>kudu-csd-5.15</module>
                 <module>kudu-csd-5.10</module>
             </modules>
         </profile>
