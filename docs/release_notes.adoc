@@ -153,6 +153,13 @@
   partition columns are a proper prefix of the primary key
   (see link:https://issues.apache.org/jira/browse/KUDU-2173[KUDU-2173]).
 
+* KUDU-2312: The evaluation order of predicates in scans with multiple
+  predicates has been made deterministic. Due to a bug, this was not necessarily
+  the case previously. Predicates are applied in most to least selective order,
+  with ties broken by column index. The evaluation order may change in the
+  future, particularly when better column statistics are made available
+  internally.
+
 * Published Kudu Java artifacts are now fully compatible with JRE 7 and JRE 8.
   There was previously a bug in the release process which made them compatible
   only with JRE 8
