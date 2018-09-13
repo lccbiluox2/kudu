@@ -20,6 +20,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <regex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -143,6 +144,26 @@ Status RunKsck(const RunnerContext& context) {
   return ksck->RunAndPrintResults();
 }
 
+bool DownstreamVersionSupportsRF1Movement(const string& version_str) {
+  static const std::regex kCdhVersionRegex(
+      "^[cC][dD][hH]([[:digit:]]+\\.[[:digit:]]+\\.[[:digit:]]+)");
+
+  std::smatch match;
+  if (!std::regex_search(version_str, match, kCdhVersionRegex)) {
+    return false;
+  }
+  if (match.size() != 2) {
+    return false;
+  }
+  Version v;
+  if (!ParseVersion(match[1], &v).ok()) {
+    return false;
+  }
+  // A couple of patches to properly handle single replica tablets (KUDU-2443)
+  // are already downstream in CDH5.16+ (i.e. they are in CDH6.0.x as well).
+  return make_tuple(v.major, v.minor, v.maintenance) >= make_tuple(5, 16, 0);
+}
+
 // Does the version in 'version_str' support movement of single replicas?
 // The minimum version required is 1.7.1.
 bool VersionSupportsRF1Movement(const string& version_str) {
@@ -150,7 +171,9 @@ bool VersionSupportsRF1Movement(const string& version_str) {
   if (!ParseVersion(version_str, &v).ok()) {
     return false;
   }
-  return make_tuple(v.major, v.minor, v.maintenance) >= make_tuple(1, 7, 1);
+
+  return make_tuple(v.major, v.minor, v.maintenance) >= make_tuple(1, 7, 1) ||
+      DownstreamVersionSupportsRF1Movement(v.extra);
 }
 
 // Whether it make sense to move replicas of single-replica tablets.
