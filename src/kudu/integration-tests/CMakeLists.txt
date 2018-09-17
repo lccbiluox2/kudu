@@ -59,7 +59,8 @@ ADD_KUDU_TEST(all_types-itest
 ADD_KUDU_TEST(alter_table-randomized-test
   PROCESSORS 4)
 ADD_KUDU_TEST(alter_table-test PROCESSORS 3)
-ADD_KUDU_TEST(authn_token_expire-itest)
+ADD_KUDU_TEST(authn_token_expire-itest
+  RESOURCE_LOCK "master-rpc-ports")
 ADD_KUDU_TEST(catalog_manager_tsk-itest PROCESSORS 2)
 ADD_KUDU_TEST(client_failover-itest)
 ADD_KUDU_TEST(client-negotiation-failover-itest
