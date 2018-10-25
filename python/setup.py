@@ -40,7 +40,7 @@ if Cython.__version__ < '0.21.0':
 MAJOR = 1
 MINOR = 8
 MICRO = 0
-CDH_SUFFIX = 'cdh6.x'
+CDH_SUFFIX = 'cdh6.1.x'
 VERSION = '%d.%d.%d-%s' % (MAJOR, MINOR, MICRO, CDH_SUFFIX)
 ISRELEASED = True
 
