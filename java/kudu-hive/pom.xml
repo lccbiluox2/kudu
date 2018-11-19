@@ -22,7 +22,7 @@
     <parent>
         <groupId>org.apache.kudu</groupId>
         <artifactId>kudu-parent</artifactId>
-        <version>1.7.0-cdh5.16.0</version>
+        <version>1.7.0-cdh5.16.1</version>
     </parent>
 
     <artifactId>kudu-hive</artifactId>
