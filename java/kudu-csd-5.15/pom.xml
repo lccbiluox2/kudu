@@ -24,7 +24,7 @@ limitations under the License.
 
   <groupId>com.cloudera.csd</groupId>
   <artifactId>KUDU5_15</artifactId>
-  <version>5.16.1-SNAPSHOT</version>
+  <version>5.16.2-SNAPSHOT</version>
   <name>Kudu CSD for CDH 5.15</name>
   <packaging>pom</packaging>
 
