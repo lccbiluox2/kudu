@@ -702,7 +702,7 @@ struct MirrorTable {
 // During the sequence of operations, a "mirror" of the table in memory is kept up to
 // date. We periodically scan the actual table, and ensure that the data in Kudu
 // matches our in-memory "mirror".
-TEST_P(AlterTableRandomized, TestRandomSequence) {
+TEST_F(AlterTableRandomized, TestRandomSequence) {
   MirrorTable t(client_);
   ASSERT_OK(t.Create());
 
