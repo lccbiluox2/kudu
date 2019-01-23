@@ -15,12 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <regex.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <iterator>
 #include <memory>
-#include <regex>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -32,6 +34,7 @@
 #include <glog/logging.h>
 
 #include "kudu/gutil/basictypes.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/split.h"
@@ -145,18 +148,26 @@ Status RunKsck(const RunnerContext& context) {
 }
 
 bool DownstreamVersionSupportsRF1Movement(const string& version_str) {
-  static const std::regex kCdhVersionRegex(
-      "^[cC][dD][hH]([[:digit:]]+\\.[[:digit:]]+\\.[[:digit:]]+)");
+  static const char* const kCdhVersionRegex =
+      "^[cC][dD][hH]([[:digit:]]+\\.[[:digit:]]+\\.[[:digit:]]+)";
+  static std::once_flag once;
+  static regex_t regex;
+  std::call_once(once, []{
+      CHECK_EQ(0, regcomp(&regex, kCdhVersionRegex, REG_EXTENDED)); });
 
-  std::smatch match;
-  if (!std::regex_search(version_str, match, kCdhVersionRegex)) {
+  regmatch_t m[2];
+  if (regexec(&regex, version_str.c_str(), arraysize(m), m, 0) != 0) {
     return false;
   }
-  if (match.size() != 2) {
+  if (m[0].rm_so != 0 || m[1].rm_so != 3) {
+    // If matches, the first match should contain all the expression,
+    // and the second should start with the selected expression.
     return false;
   }
+
   Version v;
-  if (!ParseVersion(match[1], &v).ok()) {
+  if (!ParseVersion(version_str.substr(m[1].rm_so,
+                                       m[1].rm_eo - m[1].rm_so), &v).ok()) {
     return false;
   }
   // A couple of patches to properly handle single replica tablets (KUDU-2443)
