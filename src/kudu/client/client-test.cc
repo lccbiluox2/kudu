@@ -112,6 +112,7 @@
 DECLARE_bool(allow_unsafe_replication_factor);
 DECLARE_bool(fail_dns_resolution);
 DECLARE_bool(log_inject_latency);
+DECLARE_bool(master_client_location_assignment_enabled);
 DECLARE_bool(master_support_connect_to_master_rpc);
 DECLARE_bool(rpc_trace_negotiation);
 DECLARE_bool(scanner_inject_service_unavailable_on_continue_scan);
@@ -5806,6 +5807,7 @@ class ClientWithLocationTest : public ClientTest {
     const string location = "/foo";
     FLAGS_location_mapping_cmd = strings::Substitute("$0 $1",
                                                      location_cmd_path, location);
+    FLAGS_master_client_location_assignment_enabled = true;
   }
 };
 

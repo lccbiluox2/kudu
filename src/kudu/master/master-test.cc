@@ -102,6 +102,7 @@ using std::vector;
 using strings::Substitute;
 
 DECLARE_bool(catalog_manager_check_ts_count_for_create_table);
+DECLARE_bool(master_client_location_assignment_enabled);
 DECLARE_bool(raft_prepare_replacement_before_eviction);
 DECLARE_double(sys_catalog_fail_during_write);
 DECLARE_int32(diagnostics_log_stack_traces_interval_ms);
@@ -1631,6 +1632,9 @@ TEST_F(MasterTest, TestConnectToMasterAndAssignLocation) {
                                                    "testdata/first_argument.sh");
   const string location = "/foo";
   FLAGS_location_mapping_cmd = Substitute("$0 $1", kLocationCmdPath, location);
+  // The scenarios in this test assign locations to connecting clients.
+  FLAGS_master_client_location_assignment_enabled = true;
+
   {
     ConnectToMasterRequestPB req;
     ConnectToMasterResponsePB resp;

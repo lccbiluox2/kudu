@@ -77,14 +77,12 @@ DEFINE_bool(master_non_leader_masters_propagate_tsk, false,
             "tests scenarios only and should not be used elsewhere.");
 TAG_FLAG(master_non_leader_masters_propagate_tsk, hidden);
 
-DEFINE_bool(master_client_location_assignment_enabled, true,
+DEFINE_bool(master_client_location_assignment_enabled, false,
             "Whether masters assign locations to connecting clients. "
-            "By default they do if the location assignment command is set, "
-            "but in some test scenarios it's useful to make masters assign "
-            "locations only to tablet servers, but not clients.");
-TAG_FLAG(master_client_location_assignment_enabled, hidden);
+            "By default masters assign locations only to tablet servers, "
+            "but not clients.");
+TAG_FLAG(master_client_location_assignment_enabled, experimental);
 TAG_FLAG(master_client_location_assignment_enabled, runtime);
-TAG_FLAG(master_client_location_assignment_enabled, unsafe);
 
 using google::protobuf::Message;
 using kudu::consensus::ReplicaManagementInfoPB;
@@ -534,7 +532,7 @@ void MasterServiceImpl::ConnectToMaster(const ConnectToMasterRequestPB* /*req*/,
 
   // Assign a location to the client if needed.
   if (!FLAGS_location_mapping_cmd.empty() &&
-      PREDICT_TRUE(FLAGS_master_client_location_assignment_enabled)) {
+      PREDICT_FALSE(FLAGS_master_client_location_assignment_enabled)) {
     string location;
     Status s = GetLocationFromLocationMappingCmd(FLAGS_location_mapping_cmd,
                                                  rpc->remote_address().host(),
