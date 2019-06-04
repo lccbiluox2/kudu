@@ -47,6 +47,7 @@
 #include "kudu/util/status.h"
 
 namespace kudu {
+class DnsResolver;
 class MaintenanceManager;
 class MaintenanceOp;
 class MonoDelta;
@@ -108,7 +109,8 @@ class TabletReplica : public RefCountedThreadSafe<TabletReplica>,
                std::shared_ptr<rpc::Messenger> messenger,
                scoped_refptr<rpc::ResultTracker> result_tracker,
                scoped_refptr<log::Log> log,
-               ThreadPool* prepare_pool);
+               ThreadPool* prepare_pool,
+               DnsResolver* resolver);
 
   // Synchronously transition this replica to STOPPED state from any other
   // state. This also stops RaftConsensus. If a Stop() operation is already in
@@ -254,10 +256,8 @@ class TabletReplica : public RefCountedThreadSafe<TabletReplica>,
     return log_anchor_registry_;
   }
 
-  // Returns the tablet_id of the tablet managed by this TabletReplica.
-  // Returns the correct tablet_id even if the underlying tablet is not available
-  // yet.
-  const std::string& tablet_id() const { return tablet_id_; }
+  const std::string& table_id() const { return meta_->table_id(); }
+  const std::string& tablet_id() const { return meta_->tablet_id(); }
 
   // Convenience method to return the permanent_uuid of this peer.
   std::string permanent_uuid() const { return tablet_->metadata()->fs_manager()->uuid(); }
@@ -322,7 +322,6 @@ class TabletReplica : public RefCountedThreadSafe<TabletReplica>,
   const scoped_refptr<TabletMetadata> meta_;
   const scoped_refptr<consensus::ConsensusMetadataManager> cmeta_manager_;
 
-  const std::string tablet_id_;
   const consensus::RaftPeerPB local_peer_pb_;
   scoped_refptr<log::LogAnchorRegistry> log_anchor_registry_; // Assigned in tablet_replica-test
 

@@ -104,26 +104,78 @@ class TestKuduBackup extends KuduTestSuite {
 
   @Test
   def testBackupMissingTable(): Unit = {
+    // Check that a backup of a missing table fails fast with an exception if the
+    // fail-on-first-error option is set.
     try {
-      val options = createBackupOptions(Seq("missingTable"))
-      doBackup(options)
+      val failFastOptions = createBackupOptions(Seq("missingTable")).copy(failOnFirstError = true)
+      runBackup(failFastOptions)
       fail()
     } catch {
-      case e: KuduException =>
-        assertTrue(e.getMessage.contains("the table does not exist"))
+      case e: KuduException => assertTrue(e.getMessage.contains("the table does not exist"))
     }
+
+    // Check that a backup of a missing table does not fail fast or throw an exception with the
+    // default setting to not fail on individual table errors. The failure is indicated by the
+    // return value.
+    val options = createBackupOptions(Seq("missingTable"))
+    assertEquals(1, runBackup(options))
+  }
+
+  @Test
+  def testFailedTableBackupDoesNotFailOtherTableBackups() {
+    insertRows(table, 100) // Insert data into the default test table.
+
+    // Run a fail-fast backup. It should fail because the first table doesn't exist.
+    // There's no guarantee about the order backups run in, so the table that does exist may or may
+    // not have been backed up.
+    val failFastOptions =
+      createBackupOptions(Seq("missingTable", tableName)).copy(failOnFirstError = true)
+    try {
+      KuduBackup.run(failFastOptions, ss)
+      fail()
+    } catch {
+      case e: KuduException => assertTrue(e.getMessage.contains("the table does not exist"))
+    }
+
+    // Run a backup with the default setting to not fail on table errors. It should back up the
+    // table that does exist, it should not throw an exception, and it should return 1 to indicate
+    // some error. The logs should contain a message about the missing table.
+    val options = createBackupOptions(Seq("missingTable", tableName))
+    captureLogs(() => assertEquals(1, KuduBackup.run(options, ss)))
+      .contains("the table does not exist")
+
+    // Restore the backup of the non-failed table and validate the end result.
+    restoreAndValidateTable(tableName, 100)
   }
 
   @Test
   def testRestoreWithNoBackup(): Unit = {
+    // Check that a restore of a table with no backups fails fast with an exception if the
+    // fail-on-first-error option is set.
+    val failFastOptions = createRestoreOptions(Seq(tableName)).copy(failOnFirstError = true)
     try {
-      val options = createRestoreOptions(Seq(tableName))
-      doRestore(options)
+      assertEquals(1, runRestore(failFastOptions))
       fail()
     } catch {
       case e: RuntimeException =>
         assertEquals(e.getMessage, s"No valid backups found for table: $tableName")
     }
+
+    // Check that a restore of a table with no backups does not fail fast or throw an exception if
+    // default no-fail-fast option is set.
+    assertEquals(1, runRestore(createRestoreOptions(Seq("missingTable"))))
+  }
+
+  @Test
+  def testFailedTableRestoreDoesNotFailOtherTableRestores() {
+    insertRows(table, 100)
+    KuduBackup.run(createBackupOptions(Seq(tableName)), ss)
+
+    // There's no guarantee about the order restores run in, so it doesn't work to test fail-fast
+    // and then the default no-fail-fast because the actual table may have been restored.
+    captureLogs(
+      () => assertEquals(1, runRestore(createRestoreOptions(Seq("missingTable", tableName)))))
+      .contains("Failed to restore table")
   }
 
   @Test
@@ -139,9 +191,9 @@ class TestKuduBackup extends KuduTestSuite {
     // It will use a diff scan and won't check the existing dependency graph.
     val options = createBackupOptions(Seq(tableName), fromMs = beforeMs)
     val logs = captureLogs { () =>
-      doBackup(options)
+      assertEquals(0, runBackup(options))
     }
-    assertTrue(logs.contains("Performing an incremental backup, fromMs was set to"))
+    assertTrue(logs.contains("Performing an incremental backup: fromMs was set to"))
     validateBackup(options, 100, true)
   }
 
@@ -155,9 +207,9 @@ class TestKuduBackup extends KuduTestSuite {
     // Force a full backup. It should contain all the rows.
     val options = createBackupOptions(Seq(tableName), forceFull = true)
     val logs = captureLogs { () =>
-      doBackup(options)
+      assertEquals(0, runBackup(options))
     }
-    assertTrue(logs.contains("Performing a full backup, forceFull was set to true"))
+    assertTrue(logs.contains("Performing a full backup: forceFull was set to true"))
     validateBackup(options, 200, false)
   }
 
@@ -181,19 +233,23 @@ class TestKuduBackup extends KuduTestSuite {
     val table = createRandomTable()
     val tableName = table.getName
     val maxRows = 200
-    val rows = loadRandomData(table)
+    loadRandomData(table)
 
-    // Run a full backup.
-    backupAndValidateTable(tableName, rows.length)
+    // Run a full backup. Note that, here and below, we do not validate the backups against the
+    // generated rows. There may be duplicates in the generated rows. Instead, the restored table is
+    // checked against the original table, which is less exhaustive but still a good test.
+    val options = createBackupOptions(Seq(tableName))
+    assertEquals(0, runBackup(options))
 
     // Run 1 to 5 incremental backups.
     val incrementalCount = random.nextInt(5) + 1
     (0 to incrementalCount).foreach { i =>
-      val incrementalRows = loadRandomData(table, maxRows)
-      backupAndValidateTable(tableName, incrementalRows.length, true)
+      loadRandomData(table, maxRows)
+      val incOptions = createBackupOptions(Seq(tableName))
+      assertEquals(0, runBackup(incOptions))
     }
 
-    doRestore(createRestoreOptions(Seq(tableName)))
+    assertEquals(0, runRestore(createRestoreOptions(Seq(tableName))))
     validateTablesMatch(tableName, s"$tableName-restore")
   }
 
@@ -209,16 +265,33 @@ class TestKuduBackup extends KuduTestSuite {
     insertRows(table1, numRows)
     insertRows(table2, numRows)
 
-    doBackup(createBackupOptions(Seq(table1Name, table2Name)))
-    doRestore(createRestoreOptions(Seq(table1Name, table2Name)))
+    assertEquals(0, runBackup(createBackupOptions(Seq(table1Name, table2Name))))
+    assertEquals(0, runRestore(createRestoreOptions(Seq(table1Name, table2Name))))
 
-    val rdd1 =
-      kuduContext.kuduRDD(ss.sparkContext, s"$table1Name-restore", List("key"))
+    val rdd1 = kuduContext.kuduRDD(ss.sparkContext, s"$table1Name-restore", List("key"))
     assertResult(numRows)(rdd1.count())
 
-    val rdd2 =
-      kuduContext.kuduRDD(ss.sparkContext, s"$table2Name-restore", List("key"))
+    val rdd2 = kuduContext.kuduRDD(ss.sparkContext, s"$table2Name-restore", List("key"))
     assertResult(numRows)(rdd2.count())
+  }
+
+  @Test
+  def testParallelBackupAndRestore() {
+    val numRows = 1
+    val tableNames = Range(0, 10).map { i =>
+      val tableName = s"table$i"
+      val table = kuduClient.createTable(tableName, schema, tableOptions)
+      insertRows(table, numRows)
+      tableName
+    }
+
+    assertEquals(0, runBackup(createBackupOptions(tableNames).copy(numParallelBackups = 3)))
+    assertEquals(0, runRestore(createRestoreOptions(tableNames).copy(numParallelRestores = 4)))
+
+    tableNames.map { tableName =>
+      val rdd = kuduContext.kuduRDD(ss.sparkContext, s"$tableName-restore", List("key"))
+      assertResult(numRows)(rdd.count())
+    }
   }
 
   @Test
@@ -333,7 +406,7 @@ class TestKuduBackup extends KuduTestSuite {
     backupAndValidateTable(tableName, 10, true)
 
     // Restore the table and validate.
-    doRestore(createRestoreOptions(Seq(tableName)))
+    assertEquals(0, runRestore(createRestoreOptions(Seq(tableName))))
 
     val restoreTable = kuduClient.openTable(s"$tableName-restore")
     val scanner = kuduClient.newScannerBuilder(restoreTable).build()
@@ -396,7 +469,7 @@ class TestKuduBackup extends KuduTestSuite {
     backupAndValidateTable(tableName, 15, true)
 
     // Restore the table and validate.
-    doRestore(createRestoreOptions(Seq(tableName)))
+    assertEquals(0, runRestore(createRestoreOptions(Seq(tableName))))
 
     val restoreTable = kuduClient.openTable(s"$tableName-restore")
     val scanner = kuduClient.newScannerBuilder(restoreTable).build()
@@ -555,11 +628,11 @@ class TestKuduBackup extends KuduTestSuite {
       expectIncremental: Boolean = false) = {
     val options = createBackupOptions(Seq(tableName))
     // Run the backup.
-    doBackup(options)
+    assertEquals(0, runBackup(options))
     validateBackup(options, expectedRowCount, expectIncremental)
   }
 
-  def doBackup(options: BackupOptions): Unit = {
+  def runBackup(options: BackupOptions): Int = {
     // Log the timestamps to simplify flaky debugging.
     log.info(s"nowMs: ${System.currentTimeMillis()}")
     val hts = HybridTimeUtil.HTTimestampToPhysicalAndLogical(kuduClient.getLastPropagatedTimestamp)
@@ -572,10 +645,10 @@ class TestKuduBackup extends KuduTestSuite {
       options: BackupOptions,
       expectedRowCount: Long,
       expectIncremental: Boolean): Unit = {
-    val io = new SessionIO(ss, options)
+    val io = new BackupIO(ss.sparkContext.hadoopConfiguration, options.rootPath)
     val tableName = options.tables.head
     val table = harness.getClient.openTable(tableName)
-    val backupPath = io.backupPath(table, options.toMs)
+    val backupPath = io.backupPath(table.getTableId, table.getName, options.toMs)
     val metadataPath = io.backupMetadataPath(backupPath)
     val metadata = io.readTableMetadata(metadataPath)
 
@@ -587,7 +660,7 @@ class TestKuduBackup extends KuduTestSuite {
     }
 
     // Verify the output data.
-    val schema = io.dataSchema(table.getSchema, expectIncremental)
+    val schema = BackupUtils.dataSchema(table.getSchema, expectIncremental)
     val df = ss.sqlContext.read
       .format(metadata.getDataFormat)
       .schema(schema)
@@ -597,14 +670,14 @@ class TestKuduBackup extends KuduTestSuite {
 
   def restoreAndValidateTable(tableName: String, expectedRowCount: Long) = {
     val options = createRestoreOptions(Seq(tableName))
-    doRestore(options)
+    assertEquals(0, runRestore(options))
 
     // Verify the table data.
     val rdd = kuduContext.kuduRDD(ss.sparkContext, s"$tableName-restore")
     assertEquals(rdd.collect.length, expectedRowCount)
   }
 
-  def doRestore(options: RestoreOptions): Unit = {
+  def runRestore(options: RestoreOptions): Int = {
     KuduRestore.run(options, ss)
   }
 

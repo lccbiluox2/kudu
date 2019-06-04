@@ -18,13 +18,14 @@ package org.apache.kudu.test;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Random;
 
 import com.google.common.base.Throwables;
-import org.apache.log4j.AppenderSkeleton;
-import org.apache.log4j.Layout;
-import org.apache.log4j.Logger;
-import org.apache.log4j.SimpleLayout;
-import org.apache.log4j.spi.LoggingEvent;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
+import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
@@ -35,26 +36,32 @@ import org.apache.yetus.audience.InterfaceStability;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
-public class CapturingLogAppender extends AppenderSkeleton {
-  private static final Layout LAYOUT = new SimpleLayout();
+public class CapturingLogAppender extends AbstractAppender {
+  // This is the standard layout used in Kudu tests.
+  private static final PatternLayout LAYOUT = PatternLayout.newBuilder()
+      .withPattern("%d{HH:mm:ss.SSS} [%p - %t] (%F:%L) %m%n")
+      .build();
 
   private StringBuilder appended = new StringBuilder();
 
-  @Override
-  public void close() {
+  public CapturingLogAppender() {
+    // Appender name must be unique so that attaching/detaching works correctly
+    // when multiple capturing appenders are used recursively.
+    super(String.format("CapturingToFileLogAppender-%d", new Random().nextInt()),
+          /* filter */ null, LAYOUT, /* ignoreExceptions */ true, Property.EMPTY_ARRAY);
+
+    // If we don't call start(), we get an ugly log error:
+    //
+    // ERROR Attempted to append to non-started appender CapturingToFileLogAppender
+    start();
   }
 
   @Override
-  public boolean requiresLayout() {
-    return false;
-  }
-
-  @Override
-  protected void append(LoggingEvent event) {
-    appended.append(LAYOUT.format(event));
-    if (event.getThrowableInformation() != null) {
-      appended.append(Throwables.getStackTraceAsString(
-          event.getThrowableInformation().getThrowable())).append("\n");
+  public void append(LogEvent event) {
+    appended.append(getLayout().toSerializable(event));
+    if (event.getThrown() != null) {
+      appended.append(Throwables.getStackTraceAsString(event.getThrown()));
+      appended.append("\n");
     }
   }
 
@@ -75,11 +82,11 @@ public class CapturingLogAppender extends AppenderSkeleton {
    * </code>
    */
   public Closeable attach() {
-    Logger.getRootLogger().addAppender(this);
+    LoggerContext.getContext(false).getRootLogger().addAppender(this);
     return new Closeable() {
       @Override
       public void close() throws IOException {
-        Logger.getRootLogger().removeAppender(CapturingLogAppender.this);
+        LoggerContext.getContext(false).getRootLogger().removeAppender(CapturingLogAppender.this);
       }
     };
   }

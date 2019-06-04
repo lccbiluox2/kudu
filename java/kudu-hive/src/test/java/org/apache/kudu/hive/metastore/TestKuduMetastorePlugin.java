@@ -204,9 +204,19 @@ public class TestKuduMetastorePlugin {
     }
 
     // Check that creating a valid table is accepted.
-    Table table = newTable("table");
-    client.createTable(table, masterContext());
-    client.dropTable(table.getDbName(), table.getTableName());
+    {
+      Table table = newTable("table");
+      client.createTable(table, masterContext());
+      client.dropTable(table.getDbName(), table.getTableName());
+    }
+
+    // Check that creating a non-managed table is accepted.
+    {
+      Table table = newTable("table");
+      table.setTableType(TableType.EXTERNAL_TABLE.name());
+      client.createTable(table);
+      client.dropTable(table.getDbName(), table.getTableName());
+    }
   }
 
   @Test
@@ -226,6 +236,16 @@ public class TestKuduMetastorePlugin {
         assertTrue(e.getMessage().contains("Kudu table ID does not match the existing HMS entry"));
       }
 
+      // Check that altering the Kudu table with a different table ID while
+      // setting kudu.check_id to false succeeds.
+      EnvironmentContext noCheckIdCtx = new EnvironmentContext(
+          ImmutableMap.of(KuduMetastorePlugin.KUDU_CHECK_ID_KEY, "false"));
+      client.alter_table_with_environmentContext(table.getDbName(), table.getTableName(),
+          newTable(table.getTableName()), noCheckIdCtx);
+      // Alter back for more testing below.
+      client.alter_table_with_environmentContext(table.getDbName(), table.getTableName(), table,
+          noCheckIdCtx);
+
       // Try to alter the Kudu table with no storage handler.
       try {
         Table alteredTable = table.deepCopy();
@@ -235,6 +255,17 @@ public class TestKuduMetastorePlugin {
       } catch (TException e) {
         assertTrue(e.getMessage().contains(
             "Kudu table entry must contain a Kudu storage handler property"));
+      }
+
+      // Try to alter the Kudu table to a different type.
+      try {
+        Table alteredTable = table.deepCopy();
+        alteredTable.setTableType(TableType.EXTERNAL_TABLE.toString());
+        client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
+        fail();
+      } catch (TException e) {
+        assertTrue(e.getMessage().contains(
+            "Kudu table type may not be altered"));
       }
 
       // Check that altering the table succeeds.
@@ -254,73 +285,110 @@ public class TestKuduMetastorePlugin {
       client.alter_table_with_environmentContext(
           table.getDbName(), table.getTableName(), table,
           new EnvironmentContext(ImmutableMap.of(KuduMetastorePlugin.KUDU_MASTER_EVENT, "true")));
-    } finally {
-      client.dropTable(table.getDbName(), table.getTableName());
-    }
-
-    // Test altering a non-Kudu table.
-    table.getParameters().clear();
-    client.createTable(table);
-    try {
-
-      // Try to alter the table and add a Kudu table ID.
-      try {
-        Table alteredTable = table.deepCopy();
-        alteredTable.putToParameters(KuduMetastorePlugin.KUDU_TABLE_ID_KEY,
-                                     UUID.randomUUID().toString());
-        client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
-        fail();
-      } catch (TException e) {
-        assertTrue(e.getMessage().contains(
-            "non-Kudu table entry must not contain a table ID property"));
-      }
-
-      // Try to alter the table and set a Kudu storage handler.
-      try {
-        Table alteredTable = table.deepCopy();
-        alteredTable.putToParameters(hive_metastoreConstants.META_TABLE_STORAGE,
-                                     KuduMetastorePlugin.KUDU_STORAGE_HANDLER);
-        client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
-        fail();
-      } catch (TException e) {
-        assertTrue(e.getMessage().contains(
-            "non-Kudu table entry must not contain the Kudu storage handler"));
-      }
-
-      // Check that altering the table succeeds.
-      client.alter_table(table.getDbName(), table.getTableName(), table);
-
-      // Check that altering the legacy table with Kudu storage handler
-      // succeeds.
-      {
-        Table alteredTable = legacyTable.deepCopy();
-        alteredTable.putToParameters(hive_metastoreConstants.META_TABLE_STORAGE,
-                                     KuduMetastorePlugin.KUDU_STORAGE_HANDLER);
-        alteredTable.putToParameters(KuduMetastorePlugin.KUDU_TABLE_ID_KEY,
-                                     UUID.randomUUID().toString());
-        alteredTable.putToParameters(KuduMetastorePlugin.KUDU_MASTER_ADDRS_KEY,
-                                    "localhost");
-        client.alter_table(legacyTable.getDbName(), legacyTable.getTableName(),
-                           alteredTable);
-      }
 
       // Check that altering table with Kudu storage handler to legacy format
       // succeeds.
       {
         Table alteredTable = table.deepCopy();
+        alteredTable.getParameters().clear();
         alteredTable.putToParameters(hive_metastoreConstants.META_TABLE_STORAGE,
-                KuduMetastorePlugin.LEGACY_KUDU_STORAGE_HANDLER);
-        alteredTable.putToParameters(KuduMetastorePlugin.LEGACY_KUDU_TABLE_NAME,
-                "legacy_table");
+            KuduMetastorePlugin.LEGACY_KUDU_STORAGE_HANDLER);
+        alteredTable.putToParameters(KuduMetastorePlugin.KUDU_TABLE_NAME,
+            "legacy_table");
         alteredTable.putToParameters(KuduMetastorePlugin.KUDU_MASTER_ADDRS_KEY,
-                "localhost");
-        client.alter_table(table.getDbName(), table.getTableName(),
-                alteredTable);
+            "localhost");
+        client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
       }
-
     } finally {
       client.dropTable(table.getDbName(), table.getTableName());
     }
+
+    // Test altering a non-Kudu table.
+    {
+      table.getParameters().clear();
+      client.createTable(table);
+      try {
+
+        // Try to alter the table and add a Kudu table ID.
+        try {
+          Table alteredTable = table.deepCopy();
+          alteredTable.putToParameters(KuduMetastorePlugin.KUDU_TABLE_ID_KEY,
+                                       UUID.randomUUID().toString());
+          client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
+          fail();
+        } catch (TException e) {
+          assertTrue(e.getMessage().contains(
+              "non-Kudu table entry must not contain a table ID property"));
+        }
+
+        // Try to alter the table and set a Kudu storage handler.
+        try {
+          Table alteredTable = table.deepCopy();
+          alteredTable.putToParameters(hive_metastoreConstants.META_TABLE_STORAGE,
+                                       KuduMetastorePlugin.KUDU_STORAGE_HANDLER);
+          client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
+          fail();
+        } catch (TException e) {
+          assertTrue(e.getMessage().contains(
+              "non-Kudu table entry must not contain the Kudu storage handler"));
+        }
+
+        // Check that altering the table succeeds.
+        client.alter_table(table.getDbName(), table.getTableName(), table);
+
+        // Check that altering the legacy table to use the Kudu storage handler
+        // succeeds.
+        {
+          Table alteredTable = legacyTable.deepCopy();
+          alteredTable.putToParameters(hive_metastoreConstants.META_TABLE_STORAGE,
+                                       KuduMetastorePlugin.KUDU_STORAGE_HANDLER);
+          alteredTable.putToParameters(KuduMetastorePlugin.KUDU_TABLE_ID_KEY,
+                                       UUID.randomUUID().toString());
+          alteredTable.putToParameters(KuduMetastorePlugin.KUDU_MASTER_ADDRS_KEY,
+                                      "localhost");
+          client.alter_table(legacyTable.getDbName(), legacyTable.getTableName(),
+                             alteredTable);
+        }
+      } finally {
+        client.dropTable(table.getDbName(), table.getTableName());
+      }
+    }
+
+    // Test altering a non-managed table is accepted.
+    {
+      table.getParameters().clear();
+      table.setTableType(TableType.EXTERNAL_TABLE.name());
+      client.createTable(table);
+      try {
+        client.alter_table(table.getDbName(), table.getTableName(), table);
+      } finally {
+        client.dropTable(table.getDbName(), table.getTableName());
+      }
+    }
+  }
+
+  @Test
+  public void testLegacyTableHandler() throws Exception {
+    // Test creating a legacy Kudu table without context succeeds.
+    Table table = newLegacyTable("legacy_table");
+    client.createTable(table);
+
+    // Check that altering legacy table's schema succeeds.
+    {
+      Table alteredTable = table.deepCopy();
+      alteredTable.getSd().addToCols(new FieldSchema("c", "int", ""));
+      client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
+    }
+
+    // Check that renaming legacy table's schema succeeds.
+    final String newTable = "new_table";
+    {
+      Table alteredTable = table.deepCopy();
+      alteredTable.setTableName(newTable);
+      client.alter_table(table.getDbName(), table.getTableName(), alteredTable);
+    }
+    // Test dropping a legacy Kudu table without context succeeds.
+    client.dropTable(table.getDbName(), newTable);
   }
 
   @Test
@@ -358,18 +426,45 @@ public class TestKuduMetastorePlugin {
                      /* ignore unknown */ false,
                      envContext);
 
+    // Test dropping a non-Kudu table with a Kudu table ID.
+    {
+      table.getParameters().clear();
+      client.createTable(table);
+      try {
+        client.dropTable(table.getDbName(), table.getTableName(),
+            /* delete data */ true,
+            /* ignore unknown */ false,
+            envContext);
+        fail();
+      } catch (TException e) {
+        assertTrue(e.getMessage().contains("Kudu table ID does not match the non-Kudu HMS entry"));
+      } finally {
+        client.dropTable(table.getDbName(), table.getTableName());
+      }
+    }
+
     // Test dropping a non-Kudu table.
-    table.getParameters().clear();
-    client.createTable(table);
-    try {
-      client.dropTable(table.getDbName(), table.getTableName(),
-                       /* delete data */ true,
-                       /* ignore unknown */ false,
-                       envContext);
-      fail();
-    } catch (TException e) {
-      assertTrue(e.getMessage().contains("Kudu table ID does not match the non-Kudu HMS entry"));
-    } finally {
+    {
+      table.getParameters().clear();
+      client.createTable(table);
+      try {
+        client.dropTable(table.getDbName(), table.getTableName(),
+            /* delete data */ true,
+            /* ignore unknown */ false,
+            envContext);
+        fail();
+      } catch (TException e) {
+        assertTrue(e.getMessage().contains("Kudu table ID does not match the non-Kudu HMS entry"));
+      } finally {
+        client.dropTable(table.getDbName(), table.getTableName());
+      }
+    }
+
+    // Test dropping a non-managed table is accepted.
+    {
+      table.getParameters().clear();
+      table.setTableType(TableType.EXTERNAL_TABLE.name());
+      client.createTable(table);
       client.dropTable(table.getDbName(), table.getTableName());
     }
   }

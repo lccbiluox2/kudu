@@ -15,17 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <map>
 #include <memory>
 #include <set>
-#include <sstream>
 #include <string>
 #include <tuple>  // IWYU pragma: keep
 #include <type_traits>
@@ -34,6 +34,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/optional/optional.hpp>
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
@@ -123,6 +124,7 @@
 #include "kudu/util/path_util.h"
 #include "kudu/util/pb_util.h"
 #include "kudu/util/random.h"
+#include "kudu/util/scoped_cleanup.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 #include "kudu/util/subprocess.h"
@@ -413,14 +415,25 @@ class ToolTest : public KuduTest {
                            cluster_->master()->bound_rpc_addr().ToString(),
                            table_name, projection, predicates_json),
                 &lines));
+
+    vector<pair<string, string>> expected_columns;
+    if (columns.empty()) {
+      // If we ran with an empty projection, we'll actually get all the columns.
+      expected_columns = {{ "int32", "key" },
+                          { "int32", "int_val" },
+                          { "string", "string_val" }};
+    } else {
+      expected_columns = columns;
+    }
+
     size_t line_count = 0;
     int64_t value = min_value;
     for (const auto& line : lines) {
       if (line.find('(') != string::npos) {
         // Check matched rows.
         vector<string> kvs;
-        kvs.reserve(columns.size());
-        for (const auto& column : columns) {
+        kvs.reserve(expected_columns.size());
+        for (const auto& column : expected_columns) {
           // Check projected columns.
           kvs.push_back(Substitute("$0 $1=$2",
               column.first, column.second, column.second == "key" ? to_string(value) : ".*"));
@@ -594,10 +607,31 @@ class ToolTest : public KuduTest {
     ww.Cleanup();
   }
 
+  // Write YAML content to file ${KUDU_CONFIG}/kudurc.
+  void PrepareConfigFile(const string& content) {
+    string fname = GetTestPath("kudurc");
+    unique_ptr<WritableFile> writable_file;
+    ASSERT_OK(env_->NewWritableFile(fname, &writable_file));
+    ASSERT_OK(writable_file->Append(Slice(content)));
+    ASSERT_OK(writable_file->Close());
+  }
+
+  void CheckCorruptClusterInfoConfigFile(const string& content,
+                                         const string& expect_err) {
+    const string kClusterName = "external_mini_cluster";
+    NO_FATALS(PrepareConfigFile(content));
+    string stderr;
+    Status s = RunActionStderrString(Substitute("master list @$0", kClusterName), &stderr);
+    ASSERT_TRUE(s.IsRuntimeError());
+    ASSERT_STR_CONTAINS(stderr, expect_err);
+  }
+
  protected:
   void RunLoadgen(int num_tservers = 1,
                   const vector<string>& tool_args = {},
-                  const string& table_name = "");
+                  const string& table_name = "",
+                  string* tool_stdout = nullptr,
+                  string* tool_stderr = nullptr);
   void StartExternalMiniCluster(ExternalMiniClusterOptions opts = {});
   void StartMiniCluster(InternalMiniClusterOptions opts = {});
   unique_ptr<ExternalMiniCluster> cluster_;
@@ -663,7 +697,7 @@ class ToolTestCopyTableParameterized :
     }
   }
 
-  std::vector<RunCopyTableCheckArgs> GenerateArgs() {
+  vector<RunCopyTableCheckArgs> GenerateArgs() {
     RunCopyTableCheckArgs args = { kTableName,
                                    "",
                                    1,
@@ -688,7 +722,7 @@ class ToolTestCopyTableParameterized :
         return { args };
       case kTestCopyTablePredicates: {
         auto mid = total_rows_ / 2;
-        std::vector<RunCopyTableCheckArgs> multi_args;
+        vector<RunCopyTableCheckArgs> multi_args;
         {
           auto args_temp = args;
           multi_args.emplace_back(std::move(args_temp));
@@ -783,7 +817,7 @@ class ToolTestCopyTableParameterized :
       builder.AddColumn("timestamp_val")->Type(client::KuduColumnSchema::UNIXTIME_MICROS);
       builder.AddColumn("string_val")->Type(client::KuduColumnSchema::STRING)
         ->Encoding(KuduColumnStorageAttributes::EncodingType::PREFIX_ENCODING)
-        ->Default(KuduValue::CopyString(Slice("hello")));;
+        ->Default(KuduValue::CopyString(Slice("hello")));
       builder.AddColumn("bool_val")->Type(client::KuduColumnSchema::BOOL)
         ->Default(KuduValue::FromBool(false));
       builder.AddColumn("float_val")->Type(client::KuduColumnSchema::FLOAT);
@@ -865,7 +899,7 @@ void ToolTest::StartExternalMiniCluster(ExternalMiniClusterOptions opts) {
   cluster_.reset(new ExternalMiniCluster(std::move(opts)));
   ASSERT_OK(cluster_->Start());
   inspect_.reset(new MiniClusterFsInspector(cluster_.get()));
-  ASSERT_OK(CreateTabletServerMap(cluster_->master_proxy(),
+  ASSERT_OK(CreateTabletServerMap(cluster_->master_proxy(0),
                                   cluster_->messenger(), &ts_map_));
 }
 
@@ -916,6 +950,7 @@ TEST_F(ToolTest, TestTopLevelHelp) {
       "cluster.*Kudu cluster",
       "diagnose.*Diagnostic tools.*",
       "fs.*Kudu filesystem",
+      "hms.*Hive Metastores",
       "local_replica.*tablet replicas",
       "master.*Kudu Master",
       "pbc.*protobuf container",
@@ -934,6 +969,18 @@ TEST_F(ToolTest, TestTopLevelHelp) {
 }
 
 TEST_F(ToolTest, TestModeHelp) {
+  {
+    const vector<string> kFsModeRegexes = {
+        "check.*Check metadata consistency",
+        "downgrade.*Downgrade the metadata",
+        "fix.*Fix automatically-repairable metadata",
+        "list.*List the Kudu table HMS entries",
+        "precheck.*Check that the Kudu cluster is prepared",
+    };
+    NO_FATALS(RunTestHelp("hms", kFsModeRegexes));
+    NO_FATALS(RunTestHelp("hms not_a_mode", kFsModeRegexes,
+                          Status::InvalidArgument("unknown command 'not_a_mode'")));
+  }
   {
     const vector<string> kFsModeRegexes = {
         "check.*Kudu filesystem for inconsistencies",
@@ -2014,7 +2061,9 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
 // and then run 'kudu perf loadgen ...' utility against it.
 void ToolTest::RunLoadgen(int num_tservers,
                           const vector<string>& tool_args,
-                          const string& table_name) {
+                          const string& table_name,
+                          string* tool_stdout,
+                          string* tool_stderr) {
   ExternalMiniClusterOptions opts;
   opts.num_tablet_servers = num_tservers;
   NO_FATALS(StartExternalMiniCluster(std::move(opts)));
@@ -2064,12 +2113,46 @@ void ToolTest::RunLoadgen(int num_tservers,
     args.push_back(Substitute("-table_name=$0", table_name));
   }
   copy(tool_args.begin(), tool_args.end(), back_inserter(args));
-  ASSERT_OK(RunKuduTool(args));
+  ASSERT_OK(RunKuduTool(args, tool_stdout, tool_stderr));
 }
 
 // Run the loadgen benchmark with all optional parameters set to defaults.
 TEST_F(ToolTest, TestLoadgenDefaultParameters) {
   NO_FATALS(RunLoadgen());
+}
+
+// Verify it's possible to run loadgen to create a table, no records inserted.
+// Also verify that --num_rows_per_thread=0 in case of existing table
+// results in no rows inserted.
+TEST_F(ToolTest, TestLoadgenZeroRowsPerThread) {
+  // Run the tool with zer rows per thread against an existing table.
+  // The existing table should get no rows inserted.
+  {
+    string out;
+    NO_FATALS(RunLoadgen(1, { "--num_rows_per_thread=0", "--run_scan" },
+                         "an_empty_test_table", &out));
+    ASSERT_STR_MATCHES(out, "expected rows: 0");
+    ASSERT_STR_MATCHES(out, "actual rows  : 0");
+  }
+
+  // Request to run with zero rows per thread and with various numbers
+  // of generator threads. The latter parameter in such a configuration is
+  // irrelevant, and the result table should be empty anyways.
+  for (auto num_threads : { 1, 2, 10, 100 }) {
+    SCOPED_TRACE(Substitute("num_threads=$0", num_threads));
+    const vector<string> args = {
+      "perf",
+      "loadgen",
+      cluster_->master()->bound_rpc_addr().ToString(),
+      Substitute("--num_threads=$0", num_threads),
+      "--num_rows_per_thread=0",
+      "--run_scan",
+    };
+    string out;
+    ASSERT_OK(RunKuduTool(args, &out));
+    ASSERT_STR_MATCHES(out, "expected rows: 0");
+    ASSERT_STR_MATCHES(out, "actual rows  : 0");
+  }
 }
 
 // Run the loadgen benchmark in AUTO_FLUSH_BACKGROUND mode, sequential values.
@@ -2266,14 +2349,14 @@ TEST_F(ToolTest, TestNonRandomWorkloadLoadgen) {
 
 TEST_F(ToolTest, TestPerfTableScan) {
   const string& kTableName = "perf.table_scan";
-  NO_FATALS(RunLoadgen(1, { "--keep_auto_table=true", "--run_scan" }, kTableName));
+  NO_FATALS(RunLoadgen(1, { "--run_scan" }, kTableName));
   NO_FATALS(RunScanTableCheck(kTableName, "", 1, 2000, {}, "perf table_scan"));
 }
 
 TEST_F(ToolTest, TestPerfTabletScan) {
   // Create a table.
   const string& kTableName = "perf.tablet_scan";
-  NO_FATALS(RunLoadgen(1, { "--keep_auto_table=true" }, kTableName));
+  NO_FATALS(RunLoadgen(1, {}, kTableName));
 
   // Get the list of tablets.
   vector<string> tablet_ids;
@@ -3178,11 +3261,11 @@ Status CreateLegacyHmsTable(HmsClient* client,
 
   table.__set_parameters({
       make_pair(HmsClient::kStorageHandlerKey, HmsClient::kLegacyKuduStorageHandler),
-      make_pair(HmsClient::kLegacyKuduTableNameKey, kudu_table_name),
+      make_pair(HmsClient::kKuduTableNameKey, kudu_table_name),
       make_pair(HmsClient::kKuduMasterAddrsKey, kudu_master_addrs),
   });
 
-  // TODO(Hao): Remove this once HIVE-19253 is fixed.
+  // TODO(HIVE-19253): Used along with table type to indicate an external table.
   if (table_type == HmsClient::kExternalTable) {
     table.parameters[HmsClient::kExternalTableKey] = "TRUE";
   }
@@ -3201,16 +3284,20 @@ Status CreateHmsTable(HmsClient* client,
   table.tableName = table_name;
   table.tableType = table_type;
 
-  table.__set_parameters({
-      make_pair(HmsClient::kStorageHandlerKey, HmsClient::kKuduStorageHandler),
-      make_pair(HmsClient::kKuduTableIdKey, table_id),
-      make_pair(HmsClient::kKuduMasterAddrsKey, master_addresses),
-  });
-
-  // TODO(Hao): Remove this once HIVE-19253 is fixed.
+  // TODO(HIVE-19253): Used along with table type to indicate an external table.
   if (table_type == HmsClient::kExternalTable) {
     table.parameters[HmsClient::kExternalTableKey] = "TRUE";
   }
+
+  // Only set the table id on managed tables.
+  if (table_type == HmsClient::kManagedTable) {
+    table.parameters[HmsClient::kKuduTableIdKey] = table_id;
+  }
+
+  table.parameters[HmsClient::kKuduTableNameKey] =
+      Substitute("$0.$1", database_name, table_name);
+  table.parameters[HmsClient::kKuduMasterAddrsKey] = master_addresses;
+  table.parameters[HmsClient::kStorageHandlerKey] = HmsClient::kKuduStorageHandler;
 
   hive::EnvironmentContext env_ctx;
   env_ctx.__set_properties({ make_pair(HmsClient::kKuduMasterEventKey, "true") });
@@ -3247,12 +3334,22 @@ void ValidateHmsEntries(HmsClient* hms_client,
                         const string& master_addr) {
   hive::Table hms_table;
   ASSERT_OK(hms_client->GetTable(database_name, table_name, &hms_table));
-  shared_ptr<KuduTable> kudu_table;
-  ASSERT_OK(kudu_client->OpenTable(Substitute("$0.$1", database_name, table_name), &kudu_table));
+
   ASSERT_EQ(hms_table.parameters[HmsClient::kStorageHandlerKey], HmsClient::kKuduStorageHandler);
-  ASSERT_EQ(hms_table.parameters[HmsClient::kKuduTableIdKey], kudu_table->id());
   ASSERT_EQ(hms_table.parameters[HmsClient::kKuduMasterAddrsKey], master_addr);
-  ASSERT_TRUE(!ContainsKey(hms_table.parameters, HmsClient::kLegacyKuduTableNameKey));
+
+  if (hms_table.tableType == HmsClient::kManagedTable) {
+    shared_ptr<KuduTable> kudu_table;
+    ASSERT_OK(kudu_client->OpenTable(Substitute("$0.$1", database_name, table_name), &kudu_table));
+    ASSERT_TRUE(boost::iequals(kudu_table->name(),
+                               hms_table.parameters[hms::HmsClient::kKuduTableNameKey]));
+    ASSERT_EQ(kudu_table->id(), hms_table.parameters[HmsClient::kKuduTableIdKey]);
+  }
+
+  if (hms_table.tableType == HmsClient::kExternalTable) {
+    ASSERT_TRUE(ContainsKey(hms_table.parameters, HmsClient::kKuduTableNameKey));
+    ASSERT_FALSE(ContainsKey(hms_table.parameters, HmsClient::kKuduTableIdKey));
+  }
 }
 
 TEST_P(ToolTestKerberosParameterized, TestHmsDowngrade) {
@@ -3363,19 +3460,25 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
   ASSERT_OK(CreateKuduTable(kudu_client, "default.inconsistent_master_addrs"));
   ASSERT_OK(kudu_client->OpenTable("default.inconsistent_master_addrs",
         &inconsistent_master_addrs));
-  HmsCatalog invalid_hms_catalog("invalid-master-addrs");
+  HmsCatalog invalid_hms_catalog(Substitute("$0,extra_masters",
+      cluster_->master_rpc_addrs()[0].ToString()));
   ASSERT_OK(invalid_hms_catalog.Start());
   ASSERT_OK(invalid_hms_catalog.CreateTable(
         inconsistent_master_addrs->id(), inconsistent_master_addrs->name(), kUsername,
         KuduSchema::ToSchema(inconsistent_master_addrs->schema())));
 
+  // Test case: bad table id.
+  shared_ptr<KuduTable> bad_id;
+  ASSERT_OK(CreateKuduTable(kudu_client, "default.bad_id"));
+  ASSERT_OK(kudu_client->OpenTable("default.bad_id", &bad_id));
+  ASSERT_OK(hms_catalog.CreateTable(
+      "not_a_table_id", "default.bad_id", kUsername,
+      KuduSchema::ToSchema(bad_id->schema())));
+
   // Test cases: orphan tables in the HMS.
   ASSERT_OK(hms_catalog.CreateTable(
         "orphan-hms-table-id", "default.orphan_hms_table", kUsername,
         SchemaBuilder().Build()));
-  ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "orphan_hms_table_legacy_external",
-        "default.orphan_hms_table_legacy_external",
-        master_addr, HmsClient::kExternalTable, kUsername));
   ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "orphan_hms_table_legacy_managed",
         "impala::default.orphan_hms_table_legacy_managed",
         master_addr, HmsClient::kManagedTable, kUsername));
@@ -3383,19 +3486,16 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
   // Test case: orphan table in Kudu.
   ASSERT_OK(CreateKuduTable(kudu_client, "default.kudu_orphan"));
 
-  // Test case: legacy external table.
-  shared_ptr<KuduTable> legacy_external;
-  ASSERT_OK(CreateKuduTable(kudu_client, "default.legacy_external"));
-  ASSERT_OK(kudu_client->OpenTable("default.legacy_external", &legacy_external));
-  ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "legacy_external",
-        "default.legacy_external", master_addr, HmsClient::kExternalTable, kUsername));
-
   // Test case: legacy managed table.
   shared_ptr<KuduTable> legacy_managed;
   ASSERT_OK(CreateKuduTable(kudu_client, "impala::default.legacy_managed"));
   ASSERT_OK(kudu_client->OpenTable("impala::default.legacy_managed", &legacy_managed));
   ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "legacy_managed",
-        "impala::default.legacy_managed", master_addr, HmsClient::kManagedTable, kUsername));
+      "impala::default.legacy_managed", master_addr, HmsClient::kManagedTable, kUsername));
+
+  // Test case: legacy external table (pointed at the legacy managed table).
+  ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "legacy_external",
+      "impala::default.legacy_managed", master_addr, HmsClient::kExternalTable, kUsername));
 
   // Test case: legacy managed table with no owner.
   shared_ptr<KuduTable> legacy_no_owner;
@@ -3404,14 +3504,14 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
   ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "legacy_no_owner",
         "impala::default.legacy_no_owner", master_addr, HmsClient::kManagedTable, boost::none));
 
-  // Test case: legacy external table with a Hive-incompatible name (no database).
-  shared_ptr<KuduTable> legacy_external_hive_incompatible_name;
-  ASSERT_OK(CreateKuduTable(kudu_client, "legacy_external_hive_incompatible_name"));
-  ASSERT_OK(kudu_client->OpenTable("legacy_external_hive_incompatible_name",
-        &legacy_external_hive_incompatible_name));
-  ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "legacy_external_hive_incompatible_name",
-        "legacy_external_hive_incompatible_name", master_addr,
-        HmsClient::kExternalTable, kUsername));
+  // Test case: legacy managed table with a Hive-incompatible name (no database).
+  shared_ptr<KuduTable> legacy_hive_incompatible_name;
+  ASSERT_OK(CreateKuduTable(kudu_client, "legacy_hive_incompatible_name"));
+  ASSERT_OK(kudu_client->OpenTable("legacy_hive_incompatible_name",
+        &legacy_hive_incompatible_name));
+  ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "legacy_hive_incompatible_name",
+        "legacy_hive_incompatible_name", master_addr,
+        HmsClient::kManagedTable, kUsername));
 
   // Test case: Kudu table in non-default database.
   hive::Database db;
@@ -3433,14 +3533,14 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
     "default.inconsistent_schema",
     "default.inconsistent_name",
     "default.inconsistent_master_addrs",
+    "default.bad_id",
     "default.orphan_hms_table",
-    "default.orphan_hms_table_legacy_external",
     "default.orphan_hms_table_legacy_managed",
     "default.kudu_orphan",
-    "default.legacy_external",
     "default.legacy_managed",
     "default.legacy_no_owner",
-    "legacy_external_hive_incompatible_name",
+    "legacy_external",
+    "legacy_hive_incompatible_name",
     "my_db.table",
   };
 
@@ -3482,13 +3582,12 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
         Substitute("hms fix $0 --dryrun --drop_orphan_hms_tables", master_addr)));
   NO_FATALS(check());
 
-  // Drop orphan tables.
+  // Drop orphan hms tables.
   NO_FATALS(RunActionStdoutNone(
         Substitute("hms fix $0 --drop_orphan_hms_tables --nocreate_missing_hms_tables "
                    "--noupgrade_hms_tables --nofix_inconsistent_tables", master_addr)));
   make_consistent({
     "default.orphan_hms_table",
-    "default.orphan_hms_table_legacy_external",
     "default.orphan_hms_table_legacy_managed",
   });
   NO_FATALS(check());
@@ -3506,10 +3605,10 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
   NO_FATALS(RunActionStdoutNone(
         Substitute("hms fix $0 --nofix_inconsistent_tables", master_addr)));
   make_consistent({
-    "default.legacy_external",
     "default.legacy_managed",
+    "legacy_external",
     "default.legacy_no_owner",
-    "legacy_external_hive_incompatible_name",
+    "legacy_hive_incompatible_name",
   });
   NO_FATALS(check());
 
@@ -3520,6 +3619,7 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
     "default.inconsistent_schema",
     "default.inconsistent_name",
     "default.inconsistent_master_addrs",
+    "default.bad_id",
   });
   NO_FATALS(check());
 
@@ -3531,10 +3631,11 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
     "inconsistent_schema",
     "inconsistent_name_hms",
     "inconsistent_master_addrs",
+    "bad_id",
     "kudu_orphan",
-    "legacy_external",
     "legacy_managed",
-    "legacy_external_hive_incompatible_name",
+    "legacy_external",
+    "legacy_hive_incompatible_name",
   }) {
     NO_FATALS(ValidateHmsEntries(&hms_client, kudu_client, "default", table, master_addr));
   }
@@ -3546,13 +3647,13 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
   kudu_client->ListTables(&kudu_tables);
   std::sort(kudu_tables.begin(), kudu_tables.end());
   ASSERT_EQ(vector<string>({
+    "default.bad_id",
     "default.control",
     "default.inconsistent_master_addrs",
     "default.inconsistent_name_hms",
     "default.inconsistent_schema",
     "default.kudu_orphan",
-    "default.legacy_external",
-    "default.legacy_external_hive_incompatible_name",
+    "default.legacy_hive_incompatible_name",
     "default.legacy_managed",
     "default.legacy_no_owner",
     "default.uppercase",
@@ -3561,7 +3662,6 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
 
   // Check that table ownership is preserved in upgraded legacy tables.
   for (auto p : vector<pair<string, string>>({
-        make_pair("legacy_external", kUsername),
         make_pair("legacy_managed", kUsername),
         make_pair("legacy_no_owner", ""),
   })) {
@@ -3572,6 +3672,8 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
 }
 
 // Test HMS inconsistencies that must be manually fixed.
+// TODO(ghenke): Add test case for external table using the same name as
+//  an existing Kudu table.
 TEST_P(ToolTestKerberosParameterized, TestCheckAndManualFixHmsMetadata) {
   string kUsername = "alice";
   ExternalMiniClusterOptions opts;
@@ -3608,9 +3710,6 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndManualFixHmsMetadata) {
   ASSERT_OK(hms_catalog.CreateTable(
         duplicate_hms_tables->id(), "default.duplicate_hms_tables_2", kUsername,
         KuduSchema::ToSchema(duplicate_hms_tables->schema())));
-  ASSERT_OK(CreateLegacyHmsTable(&hms_client, "default", "duplicate_hms_tables_3",
-        "default.duplicate_hms_tables",
-        master_addr, HmsClient::kExternalTable, kUsername));
 
   // Test case: Kudu tables Hive-incompatible names.
   ASSERT_OK(CreateKuduTable(kudu_client, "default.hive-incompatible-name"));
@@ -3640,7 +3739,6 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndManualFixHmsMetadata) {
     for (const string& table : vector<string>({
       "duplicate_hms_tables",
       "duplicate_hms_tables_2",
-      "duplicate_hms_tables_3",
       "default.hive-incompatible-name",
       "no_database",
       "non_existent_database.table",
@@ -3667,7 +3765,6 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndManualFixHmsMetadata) {
 
   // Manually drop the duplicate HMS entries.
   ASSERT_OK(hms_catalog.DropTable(duplicate_hms_tables->id(), "default.duplicate_hms_tables_2"));
-  ASSERT_OK(hms_catalog.DropLegacyTable("default.duplicate_hms_tables_3"));
 
   // Rename the incompatible names.
   NO_FATALS(RunActionStdoutNone(Substitute(
@@ -3705,6 +3802,105 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndManualFixHmsMetadata) {
     "default.with_database",
     "non_existent_database.table",
   }), kudu_tables);
+}
+
+namespace {
+
+// Rewrites the specified HMS table, replacing the given parameters with the
+// given value.
+Status AlterHmsWithReplacedParam(HmsClient* hms_client,
+                                 const string& db, const string& table,
+                                 const string& param, const string& val) {
+  hive::Table updated_hms_table;
+  RETURN_NOT_OK(hms_client->GetTable(db, table, &updated_hms_table));
+  updated_hms_table.parameters[param] = val;
+  return hms_client->AlterTable(db, table, updated_hms_table);
+}
+
+} // anonymous namespace
+
+TEST_F(ToolTest, TestHmsIgnoresDifferentMasters) {
+  ExternalMiniClusterOptions opts;
+  opts.num_masters = 2;
+  opts.hms_mode = HmsMode::ENABLE_METASTORE_INTEGRATION;
+  NO_FATALS(StartExternalMiniCluster(std::move(opts)));
+
+  thrift::ClientOptions hms_opts;
+  HmsClient hms_client(cluster_->hms()->address(), hms_opts);
+  ASSERT_OK(hms_client.Start());
+
+  shared_ptr<KuduClient> kudu_client;
+  ASSERT_OK(cluster_->CreateClient(nullptr, &kudu_client));
+
+  // Create a Kudu table.
+  ASSERT_OK(CreateKuduTable(kudu_client, "default.table"));
+  vector<string> master_addrs;
+  for (const auto& hp : cluster_->master_rpc_addrs()) {
+    master_addrs.emplace_back(hp.ToString());
+  }
+  const string master_addrs_str = JoinStrings(master_addrs, ",");
+  // Do a sanity check that the tool is fine with the existing table.
+  // Note: In the happy case, the tool will not log to stdout or stderr.
+  NO_FATALS(RunActionStdoutNone(Substitute("hms check $0", master_addrs_str)));
+
+  // Check that the tool will be OK with the addresses in the HMS being
+  // reordered.
+  {
+    std::reverse(master_addrs.begin(), master_addrs.end());
+    hive::Table hms_table_reversed_masters;
+    ASSERT_OK(AlterHmsWithReplacedParam(&hms_client, "default", "table",
+        HmsClient::kKuduMasterAddrsKey, JoinStrings(master_addrs, ",")));
+    NO_FATALS(RunActionStdoutNone(Substitute("hms check $0", master_addrs_str)));
+  }
+
+  string out;
+  string err;
+  // Check that the tool will flag cases where the HMS contains masters that
+  // aren't quite right that overlap with the correct set of masters (e.g. in
+  // the case of a multi-master migration).
+  // Try with an extra master.
+  ASSERT_OK(AlterHmsWithReplacedParam(&hms_client, "default", "table",
+      HmsClient::kKuduMasterAddrsKey, Substitute("$0,other_master_addr", master_addrs_str)));
+  Status s = RunActionStdoutStderrString(
+      Substitute("hms check $0", master_addrs_str), &out, &err);
+  ASSERT_STR_CONTAINS(out, "default.table");
+  NO_FATALS(RunActionStdoutNone(Substitute("hms fix $0", master_addrs_str)));
+  NO_FATALS(RunActionStdoutNone(Substitute("hms check $0", master_addrs_str)));
+
+  // And with a missing master.
+  ASSERT_OK(AlterHmsWithReplacedParam(&hms_client, "default", "table",
+      HmsClient::kKuduMasterAddrsKey, cluster_->master_rpc_addrs()[0].ToString()));
+  s = RunActionStdoutStderrString(Substitute("hms check $0", master_addrs_str), &out, &err);
+  ASSERT_STR_CONTAINS(out, "default.table");
+  NO_FATALS(RunActionStdoutNone(Substitute("hms fix $0", master_addrs_str)));
+  NO_FATALS(RunActionStdoutNone(Substitute("hms check $0", master_addrs_str)));
+
+  // Set the masters to point to an entirely different set of masters.
+  ASSERT_OK(AlterHmsWithReplacedParam(&hms_client, "default", "table",
+      HmsClient::kKuduMasterAddrsKey, "other_master_addrs"));
+
+  // The check tool will ignore the HMS metadata from the other cluster, and
+  // view the Kudu table as orphaned.
+  s = RunActionStdoutStderrString(
+      Substitute("hms check $0", master_addrs_str), &out, &err);
+  ASSERT_STR_CONTAINS(out, "default.table");
+
+  // Attempting to fix this orphaned Kudu table will lead the tool to attempt
+  // to create an HMS table entry, though one already exists.
+  s = RunActionStdoutStderrString(
+      Substitute("hms fix $0", master_addrs_str), &out, &err);
+  ASSERT_TRUE(s.IsRuntimeError()) << s.ToString();
+  ASSERT_STR_CONTAINS(err, "table already exists");
+
+  // And when specifying the right flag, it shouldn't ignore the other masters,
+  // and should be able to fix the master addresses.
+  s = RunActionStdoutStderrString(
+      Substitute("hms check $0 --noignore-other-clusters", master_addrs_str), &out, &err);
+  ASSERT_STR_CONTAINS(out, "default.table");
+  NO_FATALS(RunActionStdoutNone(
+      Substitute("hms fix $0 --noignore-other-clusters", master_addrs_str)));
+  NO_FATALS(RunActionStdoutNone(
+      Substitute("hms check $0 --noignore-other-clusters", master_addrs_str)));
 }
 
 TEST_F(ToolTest, TestHmsPrecheck) {
@@ -3776,6 +3972,68 @@ TEST_F(ToolTest, TestHmsPrecheck) {
       "foo.bar3",
       "fuzz",
   }), tables);
+}
+
+TEST_F(ToolTest, TestHmsList) {
+  ExternalMiniClusterOptions opts;
+  opts.hms_mode = HmsMode::ENABLE_HIVE_METASTORE;
+  opts.enable_kerberos = EnableKerberos();
+  NO_FATALS(StartExternalMiniCluster(std::move(opts)));
+
+  string master_addr = cluster_->master()->bound_rpc_addr().ToString();
+  thrift::ClientOptions hms_opts;
+  hms_opts.enable_kerberos = EnableKerberos();
+  hms_opts.service_principal = "hive";
+  HmsClient hms_client(cluster_->hms()->address(), hms_opts);
+  ASSERT_OK(hms_client.Start());
+  ASSERT_TRUE(hms_client.IsConnected());
+
+  FLAGS_hive_metastore_uris = cluster_->hms()->uris();
+  FLAGS_hive_metastore_sasl_enabled = EnableKerberos();
+  HmsCatalog hms_catalog(master_addr);
+  ASSERT_OK(hms_catalog.Start());
+
+  shared_ptr<KuduClient> kudu_client;
+  ASSERT_OK(cluster_->CreateClient(nullptr, &kudu_client));
+
+  // Create a simple Kudu table so we can use the schema.
+  shared_ptr<KuduTable> simple_table;
+  ASSERT_OK(CreateKuduTable(kudu_client, "default.simple"));
+  ASSERT_OK(kudu_client->OpenTable("default.simple", &simple_table));
+
+  string kUsername = "alice";
+  ASSERT_OK(hms_catalog.CreateTable(
+      "1", "default.table1", kUsername, KuduSchema::ToSchema(simple_table->schema()),
+          hms::HmsClient::kManagedTable));
+  ASSERT_OK(hms_catalog.CreateTable(
+      "2", "default.table2", boost::none, KuduSchema::ToSchema(simple_table->schema()),
+      hms::HmsClient::kExternalTable));
+
+  // Test the output when HMS integration is disabled.
+  string err;
+  RunActionStderrString(Substitute("hms list $0", master_addr), &err);
+  ASSERT_STR_CONTAINS(err,
+      "Configuration error: the Kudu leader master is not configured with "
+      "the Hive Metastore integration");
+
+  // Enable the HMS integration.
+  cluster_->ShutdownNodes(cluster::ClusterNodes::MASTERS_ONLY);
+  cluster_->EnableMetastoreIntegration();
+  ASSERT_OK(cluster_->Restart());
+
+  // Run the list tool with the defaults. atabase,table,type,$0
+  string out;
+  RunActionStdoutString(Substitute("hms list $0", master_addr), &out);
+  ASSERT_STR_CONTAINS(out,
+      "default  | table1 | MANAGED_TABLE  | default.table1");
+  ASSERT_STR_CONTAINS(out,
+      "default  | table2 | EXTERNAL_TABLE | default.table2");
+
+  // Run the list tool filtering columns and using a different format.
+  RunActionStdoutString(Substitute("hms list --columns table,owner,kudu.table_id, --format=csv $0",
+                                   master_addr), &out);
+  ASSERT_STR_CONTAINS(out, "table1,alice,1");
+  ASSERT_STR_CONTAINS(out, "table2,,");
 }
 
 // This test is parameterized on the serialization mode and Kerberos.
@@ -4511,6 +4769,47 @@ TEST_F(ToolTest, TestGetFlags) {
   }
 }
 
+// This is a synthetic test to provide coverage for regressions of KUDU-2819.
+TEST_F(ToolTest, TabletServersWithUnusualFlags) {
+  // Run many tablet servers: it helps in detection of races, if any.
+#if defined(THREAD_SANITIZER)
+  // In case of TSAN builds, it takes too long to wait for the start up of too
+  // many tablet servers.
+  static constexpr int kNumTabletServers = 32;
+#else
+  // Run as many tablet servers in external minicluster as possible.
+  static constexpr int kNumTabletServers = 62;
+#endif
+  ExternalMiniClusterOptions opts;
+  opts.num_tablet_servers = kNumTabletServers;
+  NO_FATALS(StartExternalMiniCluster(std::move(opts)));
+
+  // Leave only one tablet server running, shutdown all others.
+  for (size_t i = 1; i < kNumTabletServers; ++i) {
+    cluster_->tablet_server(i)->Shutdown();
+  }
+
+  // The 'cluster ksck' tool should report on unavailable tablet servers.
+  const string& master_addr = cluster_->master()->bound_rpc_addr().ToString();
+  {
+    string err;
+    Status s = RunActionStderrString(
+        Substitute("cluster ksck $0", master_addr), &err);
+    ASSERT_TRUE(s.IsRuntimeError()) << s.ToString();
+    ASSERT_STR_CONTAINS(err, "Runtime error: ksck discovered errors");
+  }
+
+  // The 'cluster rebalance' tool should bail and report an error due to
+  // unavailability of tablet servers in the cluster.
+  {
+    string err;
+    Status s = RunActionStderrString(
+        Substitute("cluster rebalance $0", master_addr), &err);
+    ASSERT_TRUE(s.IsRuntimeError()) << s.ToString();
+    ASSERT_STR_CONTAINS(err, "unacceptable health status UNAVAILABLE");
+  }
+}
+
 TEST_F(ToolTest, TestParseStacks) {
   const string kDataPath = JoinPathSegments(GetTestExecutableDirectory(),
                                             "testdata/sample-diagnostics-log.txt");
@@ -4532,6 +4831,111 @@ TEST_F(ToolTest, TestParseStacks) {
   ASSERT_TRUE(s.IsRuntimeError());
   ASSERT_STR_MATCHES(stderr, "failed to parse stacks from .*: at line 1: "
                              "invalid JSON payload.*Missing a closing quotation mark in string");
+}
+
+TEST_F(ToolTest, ClusterNameResolverEnvNotSet) {
+  const string kClusterName = "external_mini_cluster";
+  CHECK_ERR(unsetenv("KUDU_CONFIG"));
+  string stderr;
+  Status s = RunActionStderrString(
+        Substitute("master list @$0", kClusterName),
+        &stderr);
+  ASSERT_TRUE(s.IsRuntimeError());
+  ASSERT_STR_CONTAINS(
+      stderr, "Not found: ${KUDU_CONFIG} is missing");
+}
+
+TEST_F(ToolTest, ClusterNameResolverFileNotExist) {
+  const string kClusterName = "external_mini_cluster";
+  CHECK_ERR(setenv("KUDU_CONFIG", GetTestDataDirectory().c_str(), 1));
+  SCOPED_CLEANUP({
+    CHECK_ERR(unsetenv("KUDU_CONFIG"));
+  });
+
+  string stderr;
+  Status s = RunActionStderrString(
+        Substitute("master list @$0", kClusterName),
+        &stderr);
+  ASSERT_TRUE(s.IsRuntimeError());
+  ASSERT_STR_CONTAINS(
+      stderr, Substitute("Not found: configuration file $0/kudurc was not found",
+              GetTestDataDirectory()));
+}
+
+TEST_F(ToolTest, ClusterNameResolverFileCorrupt) {
+  ExternalMiniClusterOptions opts;
+  opts.num_masters = 3;
+  NO_FATALS(StartExternalMiniCluster(std::move(opts)));
+  auto master_addrs_str = HostPort::ToCommaSeparatedString(cluster_->master_rpc_addrs());
+
+  // Prepare ${KUDU_CONFIG}.
+  const string kClusterName = "external_mini_cluster";
+  CHECK_ERR(setenv("KUDU_CONFIG", GetTestDataDirectory().c_str(), 1));
+  SCOPED_CLEANUP({
+    CHECK_ERR(unsetenv("KUDU_CONFIG"));
+  });
+
+  // Missing 'clusters_info' section.
+  NO_FATALS(CheckCorruptClusterInfoConfigFile(
+              Substitute(R"*($0:)*""\n"
+                         R"*(  master_addresses: $1)*", kClusterName, master_addrs_str),
+              Substitute("Not found: parse field clusters_info error: invalid node; ")));
+
+  // Missing specified cluster name.
+  NO_FATALS(CheckCorruptClusterInfoConfigFile(
+              Substitute(R"*(clusters_info:)*""\n"
+                         R"*(  $0some_suffix:)*""\n"
+                         R"*(    master_addresses: $1)*", kClusterName, master_addrs_str),
+              Substitute("Not found: parse field $0 error: invalid node; ",
+                         kClusterName)));
+
+  // Missing 'master_addresses' section.
+  NO_FATALS(CheckCorruptClusterInfoConfigFile(
+              Substitute(R"*(clusters_info:)*""\n"
+                         R"*(  $0:)*""\n"
+                         R"*(    master_addresses_some_suffix: $1)*", kClusterName, master_addrs_str),
+              Substitute("Not found: parse field master_addresses error: invalid node; ")));
+
+  // Invalid 'master_addresses' value.
+  NO_FATALS(CheckCorruptClusterInfoConfigFile(
+              Substitute(R"*(clusters_info:)*""\n"
+                         R"*(  $0:)*""\n"
+                         R"*(    master_addresses: bad,masters,addresses)*", kClusterName),
+              Substitute("Network error: Could not connect to the cluster: unable to resolve "
+                         "address for bad: Name or service not known")));
+}
+
+TEST_F(ToolTest, ClusterNameResolverNormal) {
+  ExternalMiniClusterOptions opts;
+  opts.num_masters = 3;
+  NO_FATALS(StartExternalMiniCluster(std::move(opts)));
+  auto master_addrs_str = HostPort::ToCommaSeparatedString(cluster_->master_rpc_addrs());
+
+  // Prepare ${KUDU_CONFIG}.
+  const string kClusterName = "external_mini_cluster";
+  CHECK_ERR(setenv("KUDU_CONFIG", GetTestDataDirectory().c_str(), 1));
+  SCOPED_CLEANUP({
+    CHECK_ERR(unsetenv("KUDU_CONFIG"));
+  });
+
+  string content = Substitute(
+      R"*(# some header comments)*""\n"
+      R"*(clusters_info:)*""\n"
+      R"*(  $0:  # some section comments)*""\n"
+      R"*(    master_addresses: $1  # some key comments)*", kClusterName, master_addrs_str);
+
+  NO_FATALS(PrepareConfigFile(content));
+
+  // Verify output of the two methods.
+  string out1;
+  NO_FATALS(RunActionStdoutString(
+        Substitute("master list $0 --columns=uuid,rpc-addresses", master_addrs_str),
+        &out1));
+  string out2;
+  NO_FATALS(RunActionStdoutString(
+        Substitute("master list @$0 --columns=uuid,rpc-addresses", kClusterName),
+        &out2));
+  ASSERT_EQ(out1, out2);
 }
 
 class Is343ReplicaUtilTest :

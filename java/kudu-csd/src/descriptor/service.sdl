@@ -22,7 +22,7 @@
   "compatibility" : {
     "generation" : 1,
     "cdhVersion" : {
-      "min" : "6.2.0"
+      "min" : "6.3.0"
     }
   },
   "runAs" : {
@@ -35,6 +35,13 @@
     "requiredTags" : [ "kudu" ]
   },
   "icon" : "images/icon.png",
+  "serviceDependencies" : [
+    {
+      "name": "SENTRY",
+      "required": "false",
+      "autoConfigure": "false"
+    }
+  ],
   "kerberos" : "${enable_security}",
   "commands" : [
     {

@@ -38,6 +38,7 @@
 #include "kudu/consensus/log_anchor_registry.h"
 #include "kudu/consensus/opid.pb.h"
 #include "kudu/consensus/raft_consensus.h"
+#include "kudu/fs/data_dirs.h"
 #include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
@@ -124,7 +125,6 @@ TabletReplica::TabletReplica(
     Callback<void(const std::string& reason)> mark_dirty_clbk)
     : meta_(DCHECK_NOTNULL(std::move(meta))),
       cmeta_manager_(DCHECK_NOTNULL(std::move(cmeta_manager))),
-      tablet_id_(meta_->tablet_id()),
       local_peer_pb_(std::move(local_peer_pb)),
       log_anchor_registry_(new LogAnchorRegistry()),
       apply_pool_(apply_pool),
@@ -164,7 +164,8 @@ Status TabletReplica::Start(const ConsensusBootstrapInfo& bootstrap_info,
                             shared_ptr<Messenger> messenger,
                             scoped_refptr<ResultTracker> result_tracker,
                             scoped_refptr<Log> log,
-                            ThreadPool* prepare_pool) {
+                            ThreadPool* prepare_pool,
+                            DnsResolver* resolver) {
   DCHECK(tablet) << "A TabletReplica must be provided with a Tablet";
   DCHECK(log) << "A TabletReplica must be provided with a Log";
 
@@ -210,7 +211,7 @@ Status TabletReplica::Start(const ConsensusBootstrapInfo& bootstrap_info,
       VLOG(2) << "T " << tablet_id() << " P " << consensus_->peer_uuid() << ": Peer starting";
       VLOG(2) << "RaftConfig before starting: " << SecureDebugString(consensus_->CommittedConfig());
 
-      peer_proxy_factory.reset(new RpcPeerProxyFactory(messenger_));
+      peer_proxy_factory.reset(new RpcPeerProxyFactory(messenger_, resolver));
       time_manager.reset(new TimeManager(clock_, tablet_->mvcc_manager()->GetCleanTimestamp()));
     }
 

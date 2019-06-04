@@ -230,6 +230,7 @@ set(UTIL_SRCS
   version_info.cc
   version_util.cc
   website_util.cc
+  yamlreader.cc
   zlib.cc
 )
 
@@ -237,12 +238,6 @@ set(UTIL_SRCS
 # debug builds. It's separated into a separate file so it can be
 # optimized regardless of the default optimization options.
 set_source_files_properties(memory/overwrite.cc PROPERTIES COMPILE_FLAGS "-O3")
-
-if(HAVE_LIB_VMEM)
-  set(UTIL_SRCS
-    ${UTIL_SRCS}
-    nvm_cache.cc)
-endif()
 
 set(UTIL_LIBS
   crcutil
@@ -257,6 +252,7 @@ set(UTIL_LIBS
   pb_util_proto
   protobuf
   version_info_proto
+  yaml
   zlib)
 
 if(NOT APPLE)
@@ -265,12 +261,6 @@ if(NOT APPLE)
     breakpad_client
     dl
     rt)
-endif()
-
-if(HAVE_LIB_VMEM)
-  set(UTIL_LIBS
-    ${UTIL_LIBS}
-    vmem)
 endif()
 
 # We use MallocExtension, but not in the exported version of the library.
@@ -286,6 +276,31 @@ ADD_EXPORTABLE_LIBRARY(kudu_util
   EXPORTED_DEPS ${EXPORTED_UTIL_LIBS})
 
 #######################################
+# nvm_cache
+#######################################
+
+if(HAVE_LIB_MEMKIND)
+  set(NVM_CACHE_SRCS
+    nvm_cache.cc)
+
+  set(NVM_CACHE_LIBS
+    gflags
+    glog
+    gutil
+    memkind)
+
+  if(NOT APPLE)
+    set(NVM_CACHE_LIBS
+      ${NVM_CACHE_LIBS}
+      dl
+      rt)
+  endif()
+
+  add_library(nvm_cache ${NVM_CACHE_SRCS})
+  target_link_libraries(nvm_cache ${NVM_CACHE_LIBS})
+endif()
+
+#######################################
 # kudu_util_compression
 #######################################
 set(UTIL_COMPRESSION_SRCS
@@ -293,7 +308,6 @@ set(UTIL_COMPRESSION_SRCS
 set(UTIL_COMPRESSION_LIBS
   kudu_util
   util_compression_proto
-
   glog
   gutil
   lz4
@@ -339,9 +353,9 @@ target_link_libraries(kudu_test_util
   gmock
   kudu_util)
 
-if(HAVE_LIB_VMEM)
+if(HAVE_LIB_MEMKIND)
   target_link_libraries(kudu_test_util
-    vmem)
+    nvm_cache)
 endif()
 
 #######################################
@@ -467,6 +481,7 @@ ADD_KUDU_TEST(ttl_cache-test)
 ADD_KUDU_TEST(url-coding-test)
 ADD_KUDU_TEST(user-test)
 ADD_KUDU_TEST(version_util-test)
+ADD_KUDU_TEST(yamlreader-test)
 
 if (NOT APPLE)
   ADD_KUDU_TEST(minidump-test)

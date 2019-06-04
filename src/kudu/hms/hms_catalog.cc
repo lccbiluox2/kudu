@@ -133,9 +133,10 @@ void HmsCatalog::Stop() {
 Status HmsCatalog::CreateTable(const string& id,
                                const string& name,
                                optional<const string&> owner,
-                               const Schema& schema) {
+                               const Schema& schema,
+                               const string& table_type) {
   hive::Table table;
-  RETURN_NOT_OK(PopulateTable(id, name, owner, schema, master_addresses_, &table));
+  RETURN_NOT_OK(PopulateTable(id, name, owner, schema, master_addresses_, table_type, &table));
   return ha_client_.Execute([&] (HmsClient* client) {
       return client->CreateTable(table, EnvironmentContext());
   });
@@ -172,8 +173,15 @@ Status HmsCatalog::UpgradeLegacyImpalaTable(const string& id,
       return Status::IllegalState("non-legacy table cannot be upgraded");
     }
 
-    RETURN_NOT_OK(PopulateTable(id, Substitute("$0.$1", db_name, tb_name),
-                                none, schema, master_addresses_, &table));
+    // If this is an external table, only upgrade the storage handler.
+    if (table.tableType == HmsClient::kExternalTable) {
+      table.parameters[HmsClient::kStorageHandlerKey] = HmsClient::kKuduStorageHandler;
+    } else if (table.tableType == HmsClient::kManagedTable) {
+      RETURN_NOT_OK(PopulateTable(id, Substitute("$0.$1", db_name, tb_name),
+                                  table.owner, schema, master_addresses_, table.tableType, &table));
+    } else {
+      return Status::IllegalState(Substitute("Unsupported table type $0", table.tableType));
+    }
     return client->AlterTable(db_name, tb_name, table, EnvironmentContext());
   });
 }
@@ -190,18 +198,12 @@ Status HmsCatalog::DowngradeToLegacyImpalaTable(const string& name) {
         HmsClient::kKuduStorageHandler) {
       return Status::IllegalState("non-Kudu table cannot be downgraded");
     }
-
-    // Add the legacy Kudu-specific parameters. And set it to
-    // external table type.
-    table.tableType = HmsClient::kExternalTable;
-    table.parameters[HmsClient::kLegacyKuduTableNameKey] = name;
-    table.parameters[HmsClient::kKuduMasterAddrsKey] = master_addresses_;
+    // Downgrade the storage handler.
     table.parameters[HmsClient::kStorageHandlerKey] = HmsClient::kLegacyKuduStorageHandler;
-    table.parameters[HmsClient::kExternalTableKey] = "TRUE";
-
-    // Remove the Kudu-specific field 'kudu.table_id'.
-    EraseKeyReturnValuePtr(&table.parameters, HmsClient::kKuduTableIdKey);
-
+    if (table.tableType == HmsClient::kManagedTable) {
+      // Remove the Kudu-specific field 'kudu.table_id'.
+      EraseKeyReturnValuePtr(&table.parameters, HmsClient::kKuduTableIdKey);
+    }
     return client->AlterTable(table.dbName, table.tableName, table, EnvironmentContext());
   });
 }
@@ -238,7 +240,8 @@ Status HmsCatalog::GetKuduTables(vector<hive::Table>* kudu_tables) {
 Status HmsCatalog::AlterTable(const string& id,
                               const string& name,
                               const string& new_name,
-                              const Schema& schema) {
+                              const Schema& schema,
+                              const bool& check_id) {
   Slice hms_database;
   Slice hms_table;
   RETURN_NOT_OK(ParseHiveTableIdentifier(name, &hms_database, &hms_table));
@@ -264,16 +267,17 @@ Status HmsCatalog::AlterTable(const string& id,
 
       // Check that the HMS entry belongs to the table being altered.
       if (table.parameters[HmsClient::kStorageHandlerKey] != HmsClient::kKuduStorageHandler ||
-          table.parameters[HmsClient::kKuduTableIdKey] != id) {
+          (check_id && table.parameters[HmsClient::kKuduTableIdKey] != id)) {
         // The original table isn't a Kudu table, or isn't the same Kudu table.
         return Status::NotFound("the HMS entry for the table being "
                                 "altered belongs to another table");
       }
 
       // Overwrite fields in the table that have changed, including the new name.
-      RETURN_NOT_OK(PopulateTable(id, new_name, none, schema, master_addresses_, &table));
+      RETURN_NOT_OK(PopulateTable(id, new_name, table.owner, schema, master_addresses_,
+          table.tableType, &table));
       return client->AlterTable(hms_database.ToString(), hms_table.ToString(),
-                                table, EnvironmentContext());
+                                table, EnvironmentContext(check_id));
   });
 }
 
@@ -313,6 +317,7 @@ hive::FieldSchema column_to_field(const ColumnSchema& column) {
   hive::FieldSchema field;
   field.name = column.name();
   field.type = column_to_field_type(column);
+  field.comment = column.comment();
   return field;
 }
 
@@ -329,6 +334,7 @@ Status HmsCatalog::PopulateTable(const string& id,
                                  const optional<const string&>& owner,
                                  const Schema& schema,
                                  const string& master_addresses,
+                                 const string& table_type,
                                  hive::Table* table) {
   Slice hms_database_name;
   Slice hms_table_name;
@@ -339,22 +345,28 @@ Status HmsCatalog::PopulateTable(const string& id,
     table->owner = *owner;
   }
 
-  // Add the Kudu-specific parameters. This intentionally avoids overwriting
-  // other parameters.
-  table->parameters[HmsClient::kKuduTableIdKey] = id;
-  table->parameters[HmsClient::kKuduMasterAddrsKey] = master_addresses;
-  table->parameters[HmsClient::kStorageHandlerKey] = HmsClient::kKuduStorageHandler;
-  // Workaround for HIVE-19253.
-  table->parameters[HmsClient::kExternalTableKey] = "TRUE";
-
-  // Set the table type to external so that the table's (HD)FS directory will
-  // not be deleted when the table is dropped. Deleting the directory is
+  // TODO(HIVE-21640): Fix the issue described below and in HIVE-21640
+  // Setting the table type to managed means the table's (HD)FS directory will
+  // be deleted when the table is dropped. Deleting the directory is
   // unnecessary, and causes a race in the HMS between concurrent DROP TABLE and
   // CREATE TABLE operations on existing tables.
-  table->tableType = HmsClient::kExternalTable;
+  table->tableType = table_type;
 
-  // Remove the deprecated Kudu-specific field 'kudu.table_name'.
-  EraseKeyReturnValuePtr(&table->parameters, HmsClient::kLegacyKuduTableNameKey);
+  // TODO(HIVE-19253): Used along with table type to indicate an external table.
+  if (table_type == HmsClient::kExternalTable) {
+    table->parameters[HmsClient::kExternalTableKey] = "TRUE";
+  // Only set the table id on managed tables and ensure the
+  // kExternalTableKey property is unset.
+  } else if (table_type == HmsClient::kManagedTable) {
+    table->parameters[HmsClient::kKuduTableIdKey] = id;
+    EraseKeyReturnValuePtr(&table->parameters, HmsClient::kExternalTableKey);
+  }
+
+  // Add the Kudu-specific parameters. This intentionally avoids overwriting
+  // other parameters.
+  table->parameters[HmsClient::kKuduTableNameKey] = name;
+  table->parameters[HmsClient::kKuduMasterAddrsKey] = master_addresses;
+  table->parameters[HmsClient::kStorageHandlerKey] = HmsClient::kKuduStorageHandler;
 
   // Overwrite the entire set of columns.
   vector<hive::FieldSchema> fields;
@@ -419,9 +431,12 @@ bool HmsCatalog::IsEnabled() {
   return !FLAGS_hive_metastore_uris.empty();
 }
 
-hive::EnvironmentContext HmsCatalog::EnvironmentContext() {
+hive::EnvironmentContext HmsCatalog::EnvironmentContext(const bool& check_id) {
   hive::EnvironmentContext env_ctx;
-  env_ctx.__set_properties({ std::make_pair(hms::HmsClient::kKuduMasterEventKey, "true") });
+  env_ctx.__set_properties({
+    std::make_pair(hms::HmsClient::kKuduMasterEventKey, "true"),
+    std::make_pair(hms::HmsClient::kKuduCheckIdKey, check_id ? "true" : "false"),
+  });
   return env_ctx;
 }
 

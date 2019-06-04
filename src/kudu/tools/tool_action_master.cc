@@ -34,6 +34,7 @@
 #include "kudu/common/common.pb.h"
 #include "kudu/common/wire_protocol.h"
 #include "kudu/common/wire_protocol.pb.h"
+#include "kudu/consensus/metadata.pb.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/split.h"
@@ -61,6 +62,7 @@ using kudu::master::MasterServiceProxy;
 using kudu::master::MasterServiceProxy;
 using kudu::master::ResetAuthzCacheRequestPB;
 using kudu::master::ResetAuthzCacheResponsePB;
+using kudu::consensus::RaftPeerPB;
 using kudu::rpc::RpcController;
 using std::cout;
 using std::map;
@@ -164,6 +166,10 @@ Status ListMasters(const RunnerContext& context) {
       for (const auto& master : masters) {
         values.emplace_back(StartTimeToString(master.registration()));
       }
+    } else if (boost::iequals(column, "role")) {
+      for (const auto& master : masters) {
+        values.emplace_back(RaftPeerPB::Role_Name(master.role()));
+      }
     } else {
       return Status::InvalidArgument("unknown column (--columns)", column);
     }
@@ -257,10 +263,8 @@ Status ResetAuthzCacheAtMaster(const string& master_address) {
 }
 
 Status ResetAuthzCache(const RunnerContext& context) {
-  const string& master_addresses_str =
-      FindOrDie(context.required_args, kMasterAddressesArg);
-  const vector<string>& master_addresses =
-      strings::Split(master_addresses_str, ",");
+  vector<string> master_addresses;
+  RETURN_NOT_OK(ParseMasterAddresses(context, &master_addresses));
 
   if (!FLAGS_force) {
     // Make sure the list of master addresses specified for the command
@@ -372,11 +376,11 @@ unique_ptr<Mode> BuildMasterMode() {
         .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
         .AddOptionalParameter(
             "columns",
-            string("uuid,rpc-addresses"),
+            string("uuid,rpc-addresses,role"),
             string("Comma-separated list of master info fields to "
                    "include in output.\nPossible values: uuid, "
-                   "rpc-addresses, http-addresses, version, seqno "
-                   "and start_time"))
+                   "rpc-addresses, http-addresses, version, seqno, "
+                   "start_time and role"))
         .AddOptionalParameter("format")
         .AddOptionalParameter("timeout_ms")
         .Build();

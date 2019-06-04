@@ -64,7 +64,9 @@ class HmsCatalog {
   Status CreateTable(const std::string& id,
                      const std::string& name,
                      boost::optional<const std::string&> owner,
-                     const Schema& schema) WARN_UNUSED_RESULT;
+                     const Schema& schema,
+                     const std::string& table_type = hms::HmsClient::kManagedTable)
+                     WARN_UNUSED_RESULT;
 
   // Drops a table entry from the HMS.
   //
@@ -86,12 +88,13 @@ class HmsCatalog {
   // Alters a table entry in the HMS.
   //
   // This method will fail if the HMS is unreachable, if the table doesn't exist
-  // in the HMS, or if the table entry in the HMS doesn't match the specified
-  // Kudu table ID.
+  // in the HMS. It will also fail if check_id is true and the table entry in
+  // the HMS doesn't match the specified Kudu table ID.
   Status AlterTable(const std::string& id,
                     const std::string& name,
                     const std::string& new_name,
-                    const Schema& schema) WARN_UNUSED_RESULT;
+                    const Schema& schema,
+                    const bool& check_id = true) WARN_UNUSED_RESULT;
 
   // Upgrades a legacy Impala table entry in the HMS.
   //
@@ -141,6 +144,7 @@ class HmsCatalog {
                               const boost::optional<const std::string&>& owner,
                               const Schema& schema,
                               const std::string& master_addresses,
+                              const std::string& table_type,
                               hive::Table* table) WARN_UNUSED_RESULT;
 
   // Validates and canonicalizes the provided table name according to HMS rules.
@@ -173,7 +177,7 @@ class HmsCatalog {
   static Status ParseUris(const std::string& metastore_uris, std::vector<HostPort>* hostports);
 
   // Returns a base environment context for use with calls to the HMS.
-  static hive::EnvironmentContext EnvironmentContext();
+  static hive::EnvironmentContext EnvironmentContext(const bool& check_id = true);
 
   // Kudu master addresses.
   const std::string master_addresses_;

@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <gtest/gtest.h>
 
 #include "kudu/client/client.h"
@@ -35,6 +36,7 @@
 #include "kudu/hms/mini_hms.h"
 #include "kudu/mini-cluster/external_mini_cluster.h"
 #include "kudu/util/decimal_util.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
@@ -73,11 +75,12 @@ Status HmsITestBase::CreateDatabase(const string& database_name) {
 }
 
 Status HmsITestBase::CreateKuduTable(const string& database_name,
-                                     const string& table_name) {
+                                     const string& table_name,
+                                     MonoDelta timeout) {
   // Get coverage of all column types.
-  KuduSchema schema;
   KuduSchemaBuilder b;
-  b.AddColumn("key")->Type(KuduColumnSchema::INT32)->NotNull()->PrimaryKey();
+  b.AddColumn("key")->Type(KuduColumnSchema::INT32)->NotNull()
+                    ->PrimaryKey()->Comment("The Primary Key");
   b.AddColumn("int8_val")->Type(KuduColumnSchema::INT8);
   b.AddColumn("int16_val")->Type(KuduColumnSchema::INT16);
   b.AddColumn("int32_val")->Type(KuduColumnSchema::INT32);
@@ -94,14 +97,40 @@ Status HmsITestBase::CreateKuduTable(const string& database_name,
                               ->Precision(kMaxDecimal64Precision);
   b.AddColumn("decimal128_val")->Type(KuduColumnSchema::DECIMAL)
                                ->Precision(kMaxDecimal128Precision);
-
+  KuduSchema schema;
   RETURN_NOT_OK(b.Build(&schema));
   unique_ptr<KuduTableCreator> table_creator(client_->NewTableCreator());
-  return table_creator->table_name(Substitute("$0.$1", database_name, table_name))
-                       .schema(&schema)
-                       .num_replicas(1)
-                       .set_range_partition_columns({ "key" })
-                       .Create();
+  if (timeout.Initialized()) {
+    // If specified, set the timeout for the operation.
+    table_creator->timeout(timeout);
+  }
+  return table_creator->table_name(Substitute("$0.$1",
+                                              database_name, table_name))
+      .schema(&schema)
+      .num_replicas(1)
+      .set_range_partition_columns({ "key" })
+      .Create();
+}
+
+Status HmsITestBase::CreateHmsTable(const string& database_name,
+                                    const string& table_name,
+                                    const string& table_type,
+                                    boost::optional<const string&> kudu_table_name) {
+  hive::Table hms_table;
+  hms_table.dbName = database_name;
+  hms_table.tableName = table_name;
+  hms_table.tableType = table_type;
+  // TODO(HIVE-19253): Used along with table type to indicate an external table.
+  if (table_type == HmsClient::kExternalTable) {
+    hms_table.parameters[HmsClient::kExternalTableKey] = "TRUE";
+  }
+  if (kudu_table_name) {
+    hms_table.parameters[HmsClient::kKuduTableNameKey] = *kudu_table_name;
+  } else {
+    hms_table.parameters[HmsClient::kKuduTableNameKey] =
+        Substitute("$0.$1", database_name, table_name);
+  }
+  return hms_client_->CreateTable(hms_table);
 }
 
 Status HmsITestBase::RenameHmsTable(const string& database_name,
@@ -114,6 +143,8 @@ Status HmsITestBase::RenameHmsTable(const string& database_name,
   hive::Table table;
   RETURN_NOT_OK(hms_client_->GetTable(database_name, old_table_name, &table));
   table.tableName = new_table_name;
+  table.parameters[hms::HmsClient::kKuduTableNameKey] =
+      Substitute("$0.$1", database_name, new_table_name);
   return hms_client_->AlterTable(database_name, old_table_name, table);
 }
 
@@ -141,6 +172,8 @@ void HmsITestBase::CheckTable(const string& database_name,
   hive::Table hms_table;
   ASSERT_OK(hms_client_->GetTable(database_name, table_name, &hms_table));
 
+  ASSERT_EQ(hms::HmsClient::kManagedTable, hms_table.tableType);
+
   string username;
   if (user) {
     username = *user;
@@ -153,8 +186,11 @@ void HmsITestBase::CheckTable(const string& database_name,
   ASSERT_EQ(schema.num_columns(), hms_table.sd.cols.size());
   for (int idx = 0; idx < schema.num_columns(); idx++) {
     ASSERT_EQ(schema.Column(idx).name(), hms_table.sd.cols[idx].name);
+    ASSERT_EQ(schema.Column(idx).comment(), hms_table.sd.cols[idx].comment);
   }
   ASSERT_EQ(table->id(), hms_table.parameters[hms::HmsClient::kKuduTableIdKey]);
+  ASSERT_TRUE(boost::iequals(table->name(),
+      hms_table.parameters[hms::HmsClient::kKuduTableNameKey]));
   ASSERT_EQ(HostPort::ToCommaSeparatedString(cluster_->master_rpc_addrs()),
             hms_table.parameters[hms::HmsClient::kKuduMasterAddrsKey]);
   ASSERT_EQ(hms::HmsClient::kKuduStorageHandler,

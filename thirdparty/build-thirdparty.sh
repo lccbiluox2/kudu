@@ -90,7 +90,8 @@ else
       "libunwind")    F_LIBUNWIND=1 ;;
       "llvm")         F_LLVM=1 ;;
       "trace-viewer") F_TRACE_VIEWER=1 ;;
-      "nvml")         F_NVML=1 ;;
+      "numactl")      F_NUMACTL=1 ;;
+      "memkind")      F_MEMKIND=1 ;;
       "boost")        F_BOOST=1 ;;
       "breakpad")     F_BREAKPAD=1 ;;
       "sparsehash")   F_SPARSEHASH=1 ;;
@@ -100,6 +101,7 @@ else
       "hadoop")       F_HADOOP=1 ;;
       "hive")         F_HIVE=1 ;;
       "sentry")       F_SENTRY=1 ;;
+      "yaml")         F_YAML=1 ;;
       *)              echo "Unknown module: $arg"; exit 1 ;;
     esac
   done
@@ -305,8 +307,12 @@ if [ -n "$F_UNINSTRUMENTED" -o -n "$F_CURL" ]; then
   build_curl
 fi
 
-if [ -n "$OS_LINUX" ] && [ -n "$F_UNINSTRUMENTED" -o -n "$F_NVML" ]; then
-  build_nvml
+if [ -n "$OS_LINUX" ] && [ -n "$F_UNINSTRUMENTED" -o -n "$F_NUMACTL" ]; then
+  build_numactl normal
+fi
+
+if [ -n "$OS_LINUX" ] && [ -n "$F_UNINSTRUMENTED" -o -n "$F_MEMKIND" ]; then
+  build_memkind
 fi
 
 restore_env
@@ -369,6 +375,10 @@ fi
 
 if [ -n "$F_UNINSTRUMENTED" -o -n "$F_THRIFT" ]; then
   build_thrift
+fi
+
+if [ -n "$F_UNINSTRUMENTED" -o -n "$F_YAML" ]; then
+  build_yaml
 fi
 
 restore_env
@@ -456,8 +466,12 @@ if [ -n "$F_TSAN" -o -n "$F_CURL" ]; then
   build_curl
 fi
 
-if [ -n "$OS_LINUX" ] && [ -n "$F_TSAN" -o -n "$F_NVML" ]; then
-  build_nvml
+if [ -n "$OS_LINUX" ] && [ -n "$F_TSAN" -o -n "$F_NUMACTL" ]; then
+  build_numactl tsan
+fi
+
+if [ -n "$OS_LINUX" ] && [ -n "$F_TSAN" -o -n "$F_MEMKIND" ]; then
+  build_memkind
 fi
 
 restore_env
@@ -549,6 +563,10 @@ fi
 
 if [ -n "$F_TSAN" -o -n "$F_THRIFT" ]; then
   build_thrift
+fi
+
+if [ -n "$F_TSAN" -o -n "$F_YAML" ]; then
+  build_yaml
 fi
 
 restore_env

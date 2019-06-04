@@ -23,8 +23,8 @@ repositories {
   maven { url "http://maven.jenkins.cloudera.com:8081/artifactory/cloudera-mirrors" }
   mavenCentral()
   jcenter()
-  maven { url "http://clojars.org/repo" } // Only used for the clojure plugin below.
-  maven { url "http://repo.spring.io/plugins-release" } // Only used for the propdeps plugin below.
+  maven { url "https://clojars.org/repo" } // Only used for the clojure plugin below.
+  maven { url "https://repo.spring.io/plugins-release" } // Only used for the propdeps plugin below.
   maven { url "https://plugins.gradle.org/m2/" }
 }
 
@@ -37,9 +37,9 @@ dependencies {
   compile "gradle.plugin.com.google.gradle:osdetector-gradle-plugin:1.6.2"
   compile "com.google.protobuf:protobuf-gradle-plugin:0.8.8"
   compile "com.netflix.nebula:nebula-clojure-plugin:8.1.1"
-  compile "gradle.plugin.com.github.spotbugs:spotbugs-gradle-plugin:1.7.0"
+  compile "gradle.plugin.com.github.spotbugs:spotbugs-gradle-plugin:1.7.1"
   compile "io.spring.gradle:propdeps-plugin:0.0.9.RELEASE"
-  compile "net.ltgt.gradle:gradle-errorprone-plugin:0.7.1"
+  compile "net.ltgt.gradle:gradle-errorprone-plugin:0.8"
   compile "ru.vyarus:gradle-animalsniffer-plugin:1.5.0"
   compile "com.google.code.gson:gson:2.8.5"
   compile "cz.alenkacz:gradle-scalafmt:1.7.2"

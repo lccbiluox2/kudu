@@ -20,6 +20,7 @@
 
 rootProject.name = "kudu-parent"
 include "kudu-backup"
+include "kudu-backup-tools"
 include "kudu-client"
 include "kudu-client-tools"
 include "kudu-flume-sink"
@@ -36,3 +37,4 @@ include "kudu-csd-5.15"
 include "kudu-csd-5.16"
 include "kudu-csd-6.0"
 include "kudu-csd-6.1"
+include "kudu-csd-6.2"
