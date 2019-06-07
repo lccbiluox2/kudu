@@ -451,7 +451,7 @@ class DefaultSourceTest extends KuduTestSuite with Matchers {
     kuduContext.captureRows = true
 
     // Count the number of tasks that end.
-    val actualNumTasks = withJobTaskCounter(ss.sparkContext) { _ =>
+    val actualNumTasks = withJobTaskCounter(ss.sparkContext) { () =>
       kuduContext.insertRows(
         dataDF,
         tableName,
@@ -1029,22 +1029,28 @@ class DefaultSourceTest extends KuduTestSuite with Matchers {
   @TabletServerConfig(
     flags = Array(
       "--flush_threshold_mb=1",
-      "--flush_threshold_secs=1"
+      "--flush_threshold_secs=1",
+      // Disable rowset compact to prevent DRSs being merged because they are too small.
+      "--enable_rowset_compaction=false"
     ))
   def testScanWithKeyRange() {
     upsertRowsWithRowDataSize(table, rowCount * 100, 32 * 1024)
+
+    // Wait for mrs flushed
+    Thread.sleep(5 * 1000)
+
     kuduOptions = Map(
       "kudu.table" -> tableName,
       "kudu.master" -> harness.getMasterAddressesAsString,
       "kudu.splitSizeBytes" -> "1024")
 
     // count the number of tasks that end.
-    val actualNumTasks = withJobTaskCounter(ss.sparkContext) { _ =>
+    val actualNumTasks = withJobTaskCounter(ss.sparkContext) { () =>
       val t = "scanWithKeyRangeTest"
       sqlContext.read.options(kuduOptions).format("kudu").load.createOrReplaceTempView(t)
       val results = sqlContext.sql(s"SELECT * FROM $t").collectAsList()
       assertEquals(rowCount * 100, results.size())
     }
-    assert(actualNumTasks >= 2)
+    assert(actualNumTasks > 2)
   }
 }
