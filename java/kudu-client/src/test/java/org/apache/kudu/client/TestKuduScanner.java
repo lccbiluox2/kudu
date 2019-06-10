@@ -307,12 +307,15 @@ public class TestKuduScanner {
         results.add(row);
       }
     }
-    assertEquals(mutations.size(), results.size());
+
+    // DELETEs won't be found in the results because the rows to which they
+    // apply were also inserted within the diff scan's time range, which means
+    // they will be excluded from the scan results.
+    assertEquals(mutations.size() - expectedNumDeletes, results.size());
 
     // Count the results and verify their change type.
     int resultNumInserts = 0;
     int resultNumUpdates = 0;
-    int resultNumDeletes = 0;
     int resultExtra = 0;
     for (RowResult result : results) {
       Integer key = result.getInt(0);
@@ -325,8 +328,7 @@ public class TestKuduScanner {
         assertFalse(result.isDeleted());
         resultNumUpdates++;
       } else if (type == ChangeType.DELETE) {
-        assertTrue(result.isDeleted());
-        resultNumDeletes++;
+        fail("Shouldn't see any DELETEs");
       } else {
         // The key was not found in the mutations map. This means that we somehow managed to scan
         // a row that was never mutated. It's an error and will trigger an assert below.
@@ -336,7 +338,6 @@ public class TestKuduScanner {
     }
     assertEquals(expectedNumInserts, resultNumInserts);
     assertEquals(expectedNumUpdates, resultNumUpdates);
-    assertEquals(expectedNumDeletes, resultNumDeletes);
     assertEquals(0, resultExtra);
   }
 
@@ -430,7 +431,7 @@ public class TestKuduScanner {
         continue;
       }
 
-      // Otherwise, generate an operation to mutate the row based on it's current ChangeType.
+      // Otherwise, generate an operation to mutate the row based on its current ChangeType.
       //    insert -> update|delete
       //    update -> update|delete
       //    delete -> insert
@@ -467,5 +468,40 @@ public class TestKuduScanner {
       this.endType = endType;
       this.minMutations = minMutations;
     }
+  }
+
+  @Test(timeout = 100000)
+  public void testDiffScanIsDeleted() throws Exception {
+    Schema schema = new Schema(Arrays.asList(
+        new ColumnSchema.ColumnSchemaBuilder("key", Type.INT32).key(true).build()
+    ));
+
+    KuduTable table = client.createTable(tableName, schema, getBasicCreateTableOptions());
+    KuduSession session = client.newSession();
+
+
+    // Test a very simple diff scan that should capture one deleted row.
+    Insert insert = table.newInsert();
+    insert.getRow().addInt(0, 0);
+    session.apply(insert);
+    long startHT = client.getLastPropagatedTimestamp() + 1;
+
+    Delete delete = table.newDelete();
+    delete.getRow().addInt(0, 0);
+    session.apply(delete);
+    long endHT = client.getLastPropagatedTimestamp() + 1;
+
+    KuduScanner scanner = client.newScannerBuilder(table)
+        .diffScan(startHT, endHT)
+        .build();
+    List<RowResult> results = new ArrayList<>();
+    for (RowResult row : scanner) {
+      results.add(row);
+    }
+    assertEquals(1, results.size());
+    RowResult row = results.get(0);
+    assertEquals(0, row.getInt(0));
+    assertTrue(row.hasIsDeleted());
+    assertTrue(row.isDeleted());
   }
 }

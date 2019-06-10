@@ -22,37 +22,47 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.kudu.security.Token.SignedTokenPB;
 import org.apache.kudu.Schema;
 
+import java.util.Map;
+
 @InterfaceAudience.Private
 public class GetTableSchemaResponse extends KuduRpcResponse {
 
   private final Schema schema;
   private final PartitionSchema partitionSchema;
   private final String tableId;
+  private final String tableName;
   private final int numReplicas;
   private final SignedTokenPB authzToken;
+  private final Map<String, String> extraConfig;
 
   /**
    * @param elapsedMillis Time in milliseconds since RPC creation to now
    * @param tsUUID the UUID of the tablet server that sent the response
    * @param schema the table's schema
    * @param tableId the UUID of the table in the response
+   * @param tableName the name of the table in the response
    * @param numReplicas the table's replication factor
    * @param partitionSchema the table's partition schema
    * @param authzToken an authorization token for use with this table
+   * @param extraConfig the table's extra configuration properties
    */
   GetTableSchemaResponse(long elapsedMillis,
                          String tsUUID,
                          Schema schema,
                          String tableId,
+                         String tableName,
                          int numReplicas,
                          PartitionSchema partitionSchema,
-                         SignedTokenPB authzToken) {
+                         SignedTokenPB authzToken,
+                         Map<String, String> extraConfig) {
     super(elapsedMillis, tsUUID);
     this.schema = schema;
     this.partitionSchema = partitionSchema;
     this.tableId = tableId;
+    this.tableName = tableName;
     this.numReplicas = numReplicas;
     this.authzToken = authzToken;
+    this.extraConfig = extraConfig;
   }
 
   /**
@@ -80,6 +90,14 @@ public class GetTableSchemaResponse extends KuduRpcResponse {
   }
 
   /**
+   * Get the table's name.
+   * @return the table's name
+   */
+  public String getTableName() {
+    return tableName;
+  }
+
+  /**
    * Get the table's replication factor.
    * @return the table's replication factor
    */
@@ -93,5 +111,13 @@ public class GetTableSchemaResponse extends KuduRpcResponse {
    */
   public SignedTokenPB getAuthzToken() {
     return authzToken;
+  }
+
+  /**
+   * Get the table's extra configuration properties.
+   * @return the table's extra configuration properties
+   */
+  public Map<String, String> getExtraConfig() {
+    return extraConfig;
   }
 }

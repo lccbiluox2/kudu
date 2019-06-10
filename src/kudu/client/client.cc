@@ -427,12 +427,15 @@ Status KuduClient::IsAlterTableInProgress(const string& table_name,
 Status KuduClient::GetTableSchema(const string& table_name,
                                   KuduSchema* schema) {
   MonoTime deadline = MonoTime::Now() + default_admin_operation_timeout();
+  TableIdentifierPB table;
+  table.set_table_name(table_name);
   return data_->GetTableSchema(this,
-                               table_name,
                                deadline,
+                               table,
                                schema,
                                nullptr, // partition schema
                                nullptr, // table id
+                               nullptr, // table name
                                nullptr); // number of replicas
 }
 
@@ -500,31 +503,11 @@ Status KuduClient::TableExists(const string& table_name, bool* exists) {
 
 Status KuduClient::OpenTable(const string& table_name,
                              shared_ptr<KuduTable>* table) {
-  KuduSchema schema;
-  string table_id;
-  int num_replicas;
-  PartitionSchema partition_schema;
-  MonoTime deadline = MonoTime::Now() + default_admin_operation_timeout();
-  RETURN_NOT_OK(data_->GetTableSchema(this,
-                                      table_name,
-                                      deadline,
-                                      &schema,
-                                      &partition_schema,
-                                      &table_id,
-                                      &num_replicas));
-
-  // TODO: in the future, probably will look up the table in some map to reuse
-  // KuduTable instances.
-  table->reset(new KuduTable(shared_from_this(),
-                             table_name, table_id, num_replicas,
-                             schema, partition_schema));
-
-  // When opening a table, clear the existing cached non-covered range entries.
-  // This avoids surprises where a new table instance won't be able to see the
-  // current range partitions of a table for up to the ttl.
-  data_->meta_cache_->ClearNonCoveredRangeEntries(table_id);
-
-  return Status::OK();
+  TableIdentifierPB table_identifier;
+  table_identifier.set_table_name(table_name);
+  return data_->OpenTable(this,
+                          table_identifier,
+                          table);
 }
 
 shared_ptr<KuduSession> KuduClient::NewSession() {
@@ -1334,6 +1317,13 @@ Status KuduScanner::SetSnapshotRaw(uint64_t snapshot_timestamp) {
   return Status::OK();
 }
 
+Status KuduScanner::SetDiffScan(uint64_t start_timestamp, uint64_t end_timestamp) {
+  if (data_->open_) {
+    return Status::IllegalState("Diff scan must be set before Open()");
+  }
+  return data_->mutable_configuration()->SetDiffScan(start_timestamp, end_timestamp);
+}
+
 Status KuduScanner::SetSelection(KuduClient::ReplicaSelection selection) {
   if (data_->open_) {
     return Status::IllegalState("Replica selection must be set before Open()");
@@ -1448,6 +1438,9 @@ string KuduScanner::ToString() const {
 Status KuduScanner::Open() {
   CHECK(!data_->open_) << "Scanner already open";
 
+  if (data_->configuration().has_start_timestamp()) {
+    RETURN_NOT_OK(data_->mutable_configuration()->AddIsDeletedColumn());
+  }
   data_->mutable_configuration()->OptimizeScanSpec();
   data_->partition_pruner_.Init(*data_->table_->schema().schema_,
                                 data_->table_->partition_schema(),
@@ -1717,6 +1710,10 @@ Status KuduScanTokenBuilder::SetFaultTolerant() {
 Status KuduScanTokenBuilder::SetSnapshotMicros(uint64_t snapshot_timestamp_micros) {
   data_->mutable_configuration()->SetSnapshotMicros(snapshot_timestamp_micros);
   return Status::OK();
+}
+
+Status KuduScanTokenBuilder::SetDiffScan(uint64_t start_timestamp, uint64_t end_timestamp) {
+  return data_->mutable_configuration()->SetDiffScan(start_timestamp, end_timestamp);
 }
 
 Status KuduScanTokenBuilder::SetSnapshotRaw(uint64_t snapshot_timestamp) {

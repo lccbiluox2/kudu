@@ -369,7 +369,7 @@ public class AsyncKuduClient implements AutoCloseable {
     this.channelFactory = b.createChannelFactory();
     this.masterAddresses = b.masterAddresses;
     this.masterTable = new KuduTable(this, MASTER_TABLE_NAME_PLACEHOLDER,
-        MASTER_TABLE_NAME_PLACEHOLDER, null, null, 1);
+        MASTER_TABLE_NAME_PLACEHOLDER, null, null, 1, null);
     this.defaultOperationTimeoutMs = b.defaultOperationTimeoutMs;
     this.defaultAdminOperationTimeoutMs = b.defaultAdminOperationTimeoutMs;
     this.statisticsDisabled = b.statisticsDisabled;
@@ -751,18 +751,18 @@ public class AsyncKuduClient implements AutoCloseable {
   }
 
   /**
-   * Gets a table's schema either by ID or by name. Note: the name must be
-   * provided, even if the RPC should be sent by ID.
+   * Gets a table's schema by ID or by name. If both are provided, table id is preferred.
+   *
    * @param tableName name of table
    * @param tableId immutable ID of table
    * @param parent parent RPC (for tracing), if any
    * @return a deferred object that yields the schema
    */
   private Deferred<KuduTable> getTableSchema(
-      @Nonnull final String tableName,
+      @Nullable final String tableName,
       @Nullable String tableId,
       @Nullable KuduRpc<?> parent) {
-    Preconditions.checkNotNull(tableName);
+    Preconditions.checkArgument(tableId != null || tableName != null);
 
     // Prefer a lookup by table ID over name, since the former is immutable.
     // For backwards compatibility with older tservers, we don't require authz
@@ -792,11 +792,12 @@ public class AsyncKuduClient implements AutoCloseable {
 
         LOG.debug("Opened table {}", resp.getTableId());
         return new KuduTable(AsyncKuduClient.this,
-            tableName,
+            resp.getTableName(),
             resp.getTableId(),
             resp.getSchema(),
             resp.getPartitionSchema(),
-            resp.getNumReplicas());
+            resp.getNumReplicas(),
+            resp.getExtraConfig());
       }
     });
   }
@@ -853,6 +854,17 @@ public class AsyncKuduClient implements AutoCloseable {
     };
 
     return AsyncUtil.addCallbacksDeferring(getTableSchema(name, null, null), cb, eb);
+  }
+
+  /**
+   * Open the table with the given id.
+   *
+   * @param id the id of the table to open
+   * @return a deferred KuduTable
+   */
+  Deferred<KuduTable> openTableById(String id) {
+    checkIsClosed();
+    return getTableSchema(null, id, null);
   }
 
   /**
