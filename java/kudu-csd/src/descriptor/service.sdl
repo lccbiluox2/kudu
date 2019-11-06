@@ -18,7 +18,7 @@
   "name" : "KUDU",
   "label" : "Kudu",
   "description" : "Kudu is a true column store for the Hadoop ecosystem.",
-  "version" : "6.3.1",
+  "version" : "6.3.2",
   "compatibility" : {
     "generation" : 1,
     "cdhVersion" : {
