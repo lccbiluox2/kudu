@@ -42,8 +42,6 @@ import com.google.protobuf.Message;
 import com.google.protobuf.Message.Builder;
 import com.stumbleupon.async.Deferred;
 import org.apache.yetus.audience.InterfaceAudience;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -358,6 +356,7 @@ public abstract class KuduRpc<R> {
     this.sequenceId = sequenceId;
   }
 
+  @Override
   public String toString() {
     final StringBuilder buf = new StringBuilder();
     buf.append("KuduRpc(method=");

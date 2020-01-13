@@ -63,9 +63,15 @@
         </dependency>
         <dependency>
             <groupId>io.netty</groupId>
-            <artifactId>netty</artifactId>
+            <artifactId>netty-all</artifactId>
             <version>${netty.version}</version>
         </dependency>
+
+<!--        <dependency>-->
+<!--            <groupId>io.netty</groupId>-->
+<!--            <artifactId>netty</artifactId>-->
+<!--            <version>${netty.version}</version>-->
+<!--        </dependency>-->
         <dependency>
             <groupId>org.apache.yetus</groupId>
             <artifactId>audience-annotations</artifactId>
@@ -120,6 +126,7 @@
             <version>${slf4j.version}</version>
             <scope>test</scope>
         </dependency>
+
     </dependencies>
 
     <build>
@@ -187,10 +194,10 @@
                     <pattern>com.sangupta</pattern>
                     <shadedPattern>org.apache.kudu.shaded.com.sangupta</shadedPattern>
                   </relocation>
-                  <relocation>
-                    <pattern>org.jboss.netty</pattern>
-                    <shadedPattern>org.apache.kudu.shaded.org.jboss.netty</shadedPattern>
-                  </relocation>
+<!--                  <relocation>-->
+<!--                    <pattern>org.jboss.netty</pattern>-->
+<!--                    <shadedPattern>org.apache.kudu.shaded.org.jboss.netty</shadedPattern>-->
+<!--                  </relocation>-->
                 </relocations>
               </configuration>
             </plugin>

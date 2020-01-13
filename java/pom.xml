@@ -29,9 +29,9 @@
 
     <!-- inherit from the Cloudera POM for distribution management -->
     <parent>
-      <groupId>com.cloudera.cdh</groupId>
-      <artifactId>cdh-root</artifactId>
-      <version>5.15.2</version>
+        <groupId>com.cloudera.cdh</groupId>
+        <artifactId>cdh-root</artifactId>
+        <version>5.15.2</version>
         <relativePath/>
     </parent>
 
@@ -40,6 +40,7 @@
     <description>
         Kudu.
     </description>
+
 
     <!-- Properties Management -->
     <properties>
@@ -83,7 +84,7 @@
         <log4j.version>1.2.17</log4j.version>
         <mockito-core.version>2.15.0</mockito-core.version>
         <murmur.version>1.0.0</murmur.version>
-        <netty.version>3.10.6.Final</netty.version>
+        <netty.version>4.1.28.Final</netty.version>
         <!-- Upgrading protobuf breaks el6 compatibility
              https://github.com/google/protobuf/issues/4109 -->
         <protobuf.version>3.4.0</protobuf.version>
@@ -269,7 +270,7 @@
                     <name>User API</name>
                     <description>The Kudu Application Programmer's API</description>
                     <excludePackageNames>
-                      com.google:org.apache.kudu.cfile:org.apache.kudu.consensus:org.apache.kudu.log:org.apache.kudu.master:org.apache.kudu.rpc:org.apache.kudu.server:org.apache.kudu.tablet:org.apache.kudu.tserver:org.apache.kudu.hive
+                        com.google:org.apache.kudu.cfile:org.apache.kudu.consensus:org.apache.kudu.log:org.apache.kudu.master:org.apache.kudu.rpc:org.apache.kudu.server:org.apache.kudu.tablet:org.apache.kudu.tserver:org.apache.kudu.hive
                     </excludePackageNames>
                     <includeDependencySources>false</includeDependencySources>
                 </configuration>
@@ -353,9 +354,14 @@
             <snapshots>
                 <enabled>true</enabled>
             </snapshots>
-           <releases>
-               <enabled>false</enabled>
-           </releases>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+        </repository>
+
+        <repository>
+            <id>repo</id>
+            <url>https://mvnrepository.com/</url>
         </repository>
     </repositories>
 
